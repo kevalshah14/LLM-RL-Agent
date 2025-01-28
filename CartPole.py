@@ -94,7 +94,7 @@ class LLMBrain:
                     completion = self.client.chat.completions.create(
                         model=model,
                         messages=self.llm_conversation,
-                        max_tokens=2000  # or some larger number
+                        max_tokens=2000  
 
                     )
                     response = completion.choices[0].message.content
@@ -137,7 +137,7 @@ class LLMBrain:
         
         return best_action
     
-    def llm_update_q_table(self):
+    def llm_update_q_table(self, episode_reward=None): 
         """
         Send the reward table and old Q-table to the LLM and ask for updated Q-values in JSON.
         """
@@ -168,7 +168,13 @@ class LLMBrain:
 
         Please produce the updated Q-table in the format shown in the system prompt.
         """
+        if episode_reward is not None and episode_reward < 10:
+                    user_prompt += "\n\nWARNING: The last episode had a low reward ({}). Focus on increasing "\
+                                "Q-values for states where the pole is near falling (extreme angles/positions) "\
+                                "and penalize dangerous states more heavily.".format(episode_reward)
+
         self.add_llm_conversation(user_prompt, role="user")
+
 
         llm_response = self.query_llm()
         print(f"LLM raw response:\n{llm_response}")
@@ -239,7 +245,7 @@ if __name__ == "__main__":
             f.write(f"Total reward: {total_reward}\n")
         
         # Query the LLM to update the Q-table based on the newly collected experience
-        llm_brain.llm_update_q_table()
+        llm_brain.llm_update_q_table(episode_reward=total_reward)
 
         # Save the new Q-table to file
         q_table_filename = os.path.join(episode_folder, f"episode_{episode+1}_q_table.txt")
