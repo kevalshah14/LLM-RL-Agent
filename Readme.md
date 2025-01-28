@@ -14,7 +14,7 @@ This project implements reinforcement learning agents for various environments u
 
 1. Clone the repository:
     ```sh
-    git clone <repository-url>
+    git clone https://github.com/kevalshah14/LLM-RL-Agent.git
     cd llm-rl-agent
     ```
 
