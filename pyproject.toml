@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "llm-rl-agent"
+version = "0.1.0"
+description = ""
+authors = ["Keval Shah <keval.arhan@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+gymnasium = {extras = ["classic-control"], version = "^1.0.0"}
+openai = "^1.57.2"
+numpy = "^2.2.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,3 @@
+*.env
+mountain_car_logs
+cartpole_logs
