@@ -11,6 +11,7 @@ gymnasium = {extras = ["classic-control"], version = "^1.0.0"}
 openai = "^1.57.2"
 numpy = "^2.2.0"
 matplotlib = "^3.10.0"
+google-genai = "^1.0.0"
 
 
 [build-system]

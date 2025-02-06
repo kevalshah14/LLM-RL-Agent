@@ -249,7 +249,7 @@ def main():
     folder = './cartpole_llm_no_q_logs/'
     os.makedirs(folder, exist_ok=True)
 
-    NUM_EPISODES = 50
+    NUM_EPISODES = 20
     
     # -- Lists to store rewards for plotting --
     training_rewards = []

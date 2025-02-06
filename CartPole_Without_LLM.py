@@ -1,163 +1,99 @@
 import gymnasium as gym
 import numpy as np
-import json
+from openai import OpenAI
 import time
 import os
-import matplotlib.pyplot as plt
 
-# --------------------
-#  HYPERPARAMETERS
-# --------------------
+# ----------------------------------------------------
+# 1. Set Up and Environment
+# ----------------------------------------------------
+ENV_NAME = "CartPole-v1"
+env = gym.make(ENV_NAME)
+key = os.getenv('OPENAI_API_KEY')
+# Set your OpenAI API key (replace with your actual key)
+client = OpenAI()
 
-NUM_BUCKETS = (10, 10, 20, 20)
-NUM_EPISODES = 5000
-MAX_STEPS_PER_EPISODE = 500
-ALPHA = 0.05
-GAMMA = 0.99
-EPSILON_INITIAL = 1.0
-EPSILON_MIN = 0.01
-EPSILON_DECAY = 0.9995
-ANGLE_PENALTY_COEFF = 0.1
+# ----------------------------------------------------
+# 2. Define the LLM-Based Policy Function
+# ----------------------------------------------------
+def llm_policy(state):
+    """
+    Given the current state (a NumPy array of 4 floats for CartPole),
+    this function sends a prompt to the LLM (e.g. GPT-4) to decide which action to take.
+    
+    The prompt instructs the model:
+      - The state is provided as a list.
+      - Action 0 means "move left" and action 1 means "move right".
+      - Respond ONLY with 0 or 1.
+      
+    Returns:
+      An integer action (0 or 1).
+    """
+    # Prepare a prompt with a description and the current state.
+    prompt = (
+        "You are an expert reinforcement learning agent controlling a cartpole. "
+        "The environment state is given as a list of 4 numbers. "
+        f"The current state is: {state.tolist()}. "
+        "Action 0 corresponds to moving the cart left and action 1 corresponds to moving it right. "
+        "Based on the state, decide the best action to take. "
+        "Please respond with ONLY a single number: 0 or 1."
+    )
 
-# --------------------
-#  ENVIRONMENTS
-# --------------------
+    try:
+        response = client.chat.completions(
+            model="gpt-4",  
+            messages=[
+                {"role": "system", "content": "You are an expert RL agent controlling a cartpole."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.0,  # Lower temperature for deterministic output.
+        )
+        answer = response["choices"][0]["message"]["content"].strip()
+        action = int(answer)
+        if action not in [0, 1]:
+            print(f"Unexpected action from LLM: {action}. Defaulting to 0.")
+            action = 0
+    except Exception as e:
+        print(f"LLM API error: {e}. Defaulting action to 0.")
+        action = 0
 
-env_train = gym.make("CartPole-v1")
-env_watch = gym.make("CartPole-v1", render_mode='human')
+    # (Optional) Sleep briefly to avoid rate limits.
+    time.sleep(0.5)
+    return action
 
-# --------------------
-#  DISCRETIZATION
-# --------------------
+# ----------------------------------------------------
+# 3. Evaluate One Episode Using the LLM Policy
+# ----------------------------------------------------
+def evaluate_policy_llm(render=False):
+    """
+    Runs one episode of the CartPole environment, using the LLM to choose actions.
+    Returns the total reward for the episode.
+    """
+    obs, info = env.reset()
+    total_reward = 0
+    while True:
+        if render:
+            env.render()
 
-STATE_BOUNDS = list(zip(env_train.observation_space.low, env_train.observation_space.high))
-STATE_BOUNDS[0] = (-4.8, 4.8)  
-STATE_BOUNDS[1] = (-3.0, 3.0)  
-STATE_BOUNDS[2] = (-0.418, 0.418)
-STATE_BOUNDS[3] = (-4.0, 4.0)
+        # Use the LLM to decide an action based on the current state.
+        action = llm_policy(obs)
+        obs, reward, done, truncated, info = env.step(action)
+        total_reward += reward
 
-def discretize_state(state):
-    bins = []
-    for i in range(len(state)):
-        low, high = STATE_BOUNDS[i]
-        val = min(max(state[i], low), high)
-        ratio = (val - low) / (high - low)
-        bucket_idx = int(round((NUM_BUCKETS[i] - 1) * ratio))
-        bins.append(bucket_idx)
-    return tuple(bins)
+        if done or truncated:
+            break
+    return total_reward
 
-# --------------------
-#  Q-TABLE
-# --------------------
-
-Q_table = np.zeros(NUM_BUCKETS + (env_train.action_space.n,))
-
-# --------------------
-#  POLICY (EPS-GREEDY)
-# --------------------
-
-def choose_action(state, epsilon):
-    if np.random.random() < epsilon:
-        return np.random.randint(0, env_train.action_space.n)
-    else:
-        return np.argmax(Q_table[state])
-
-def update_q_table(state, action, reward, next_state, alpha, gamma):
-    best_next_action = np.argmax(Q_table[next_state])
-    td_target = reward + gamma * Q_table[next_state][best_next_action]
-    td_error = td_target - Q_table[state][action]
-    Q_table[state][action] += alpha * td_error
-
-# --------------------
-#  TRAINING LOOP
-# --------------------
-
-def train():
-    global EPSILON_INITIAL
-    scores = []
-
-    for episode in range(NUM_EPISODES):
-        state, _ = env_train.reset()
-        state = discretize_state(state)
-        done = False
-        truncated = False
-        total_reward = 0
-
-        epsilon = max(EPSILON_MIN, EPSILON_INITIAL * (EPSILON_DECAY ** episode))
-
-        for _ in range(MAX_STEPS_PER_EPISODE):
-            action = choose_action(state, epsilon)
-            next_obs, reward, done, truncated, info = env_train.step(action)
-
-            if ANGLE_PENALTY_COEFF != 0:
-                reward -= abs(next_obs[2]) * ANGLE_PENALTY_COEFF
-
-            next_state = discretize_state(next_obs)
-            update_q_table(state, action, reward, next_state, ALPHA, GAMMA)
-
-            state = next_state
-            total_reward += reward
-
-            if done or truncated:
-                break
-
-        scores.append(total_reward)
-        # Print if desired
-        # print(f"Episode {episode+1}/{NUM_EPISODES} - Reward: {total_reward}")
-
-    return scores
-
-# --------------------
-#  MAIN
-# --------------------
-
+# ----------------------------------------------------
+# 4. Main: Run Several Episodes
+# ----------------------------------------------------
 if __name__ == "__main__":
-    start_time = time.time()
-
-    print("Starting Q-learning training on CartPole...")
-    scores = train()
-
-    end_time = time.time()
-    print(f"\nTraining completed in {end_time - start_time:.2f} seconds.")
-
-    # Save the Q-table if desired
-    q_path = os.path.join(".", "q_table_cartpole.json")
-    with open(q_path, "w") as f:
-        json.dump(Q_table.tolist(), f)
-    print(f"Q-table saved to {q_path}")
-
-    # --------------------
-    #  PLOT ONLY FIRST 50 EPISODES
-    # --------------------
-    # plt.figure(figsize=(10, 6))
-    # plt.plot(scores[:50], label='Reward per Episode (First 50)')
-    # plt.title('Training Rewards (Episodes 1-50)')
-    # plt.xlabel('Episode')
-    # plt.ylabel('Reward')
-    # plt.legend()
-    # plt.show()
-
-    # --------------------
-    #  WATCH THE AGENT
-    # --------------------
-    print("\nWatching the trained agent for a few episodes...")
     test_episodes = 5
+    rewards = []
+    
     for ep in range(test_episodes):
-        obs, _ = env_watch.reset()
-        state = discretize_state(obs)
-        done = False
-        truncated = False
-        total_reward = 0
-
-        while not done and not truncated:
-            action = np.argmax(Q_table[state])
-            obs, reward, done, truncated, info = env_watch.step(action)
-            env_watch.render()
-            total_reward += reward
-            state = discretize_state(obs)
-            time.sleep(0.02)
-
-        print(f"Test Episode {ep+1}: Total Reward = {total_reward}")
-
-    env_train.close()
-    env_watch.close()
+        R = evaluate_policy_llm(render=False)
+        rewards.append(R)
+        print(f"Episode {ep+1}: Total Reward = {R}")
+    
+    env.close()

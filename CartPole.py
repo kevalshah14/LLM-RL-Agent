@@ -4,9 +4,11 @@ import numpy as np
 import os
 import time
 import json
-
+from google import genai
+import re
 API_KEY = os.getenv('apiKey')
 BASE_URL = os.getenv('baseURL')
+GEMINI_API_KEY = os.getenv('geminiApiKey')
 
 class MemoryTable:
     def __init__(self, role="reward"):
@@ -36,8 +38,8 @@ state (x, dx, theta, dtheta) | action | {self.role}
 class LLMBrain:
     def __init__(self):
         # Create the LLM client 
-        self.client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
-        
+        # self.client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+        self.client = genai.Client(api_key=GEMINI_API_KEY)
         # Memory tables
         self.reward_table = MemoryTable(role="reward")
         self.q_table = MemoryTable(role="q_value")
@@ -80,38 +82,65 @@ class LLMBrain:
     def add_llm_conversation(self, text, role):
         self.llm_conversation.append({"role": role, "content": text})
     
+    # def query_llm(self):
+    #     models = [
+    #         "meta-llama/Meta-Llama-3.1-8B-Instruct",  # Top priority
+    #         "mistralai/Mistral-7B-Instruct-v0.2",     # Secondary priority
+    #         "meta-llama/Llama-3.3-70B-Instruct",      # Tertiary priority
+    #     ]
+        
+    #     for model in models:
+    #         for attempt in range(5):
+    #             try:
+    #                 print(f"Attempting with model: {model}")
+    #                 completion = self.client.chat.completions.create(
+    #                     model=model,
+    #                     messages=self.llm_conversation,
+    #                     max_tokens=2000  
+
+    #                 )
+    #                 response = completion.choices[0].message.content
+    #                 self.add_llm_conversation(response, "assistant")
+    #                 return response
+    #             except Exception as e:
+    #                 print(f"Error with model {model}: {e}")
+    #                 if attempt < 4:
+    #                     print("Retrying...")
+    #                     print("Waiting for 120 seconds before retrying...")
+    #                     time.sleep(120)
+    #                 else:
+    #                     print(f"Failed with model: {model}")
+    #                     break  # Move to the next model if the current one fails after 5 attempts
+        
+    #     raise Exception("All models failed after 5 attempts each.")
     def query_llm(self):
-        models = [
-            "meta-llama/Meta-Llama-3.1-8B-Instruct",  # Top priority
-            "mistralai/Mistral-7B-Instruct-v0.2",     # Secondary priority
-            "meta-llama/Llama-3.3-70B-Instruct",      # Tertiary priority
-        ]
+        prompt = " ".join(msg.get("content", "") for msg in self.llm_conversation)
+        model = "gemini-2.0-flash"
         
-        for model in models:
-            for attempt in range(5):
-                try:
-                    print(f"Attempting with model: {model}")
-                    completion = self.client.chat.completions.create(
-                        model=model,
-                        messages=self.llm_conversation,
-                        max_tokens=2000  
-
-                    )
-                    response = completion.choices[0].message.content
-                    self.add_llm_conversation(response, "assistant")
-                    return response
-                except Exception as e:
-                    print(f"Error with model {model}: {e}")
-                    if attempt < 4:
-                        print("Retrying...")
-                        print("Waiting for 120 seconds before retrying...")
-                        time.sleep(120)
-                    else:
-                        print(f"Failed with model: {model}")
-                        break  # Move to the next model if the current one fails after 5 attempts
+        for attempt in range(5):
+            try:
+                print(f"Attempting with model: {model}")
+                response = self.client.models.generate_content(
+                    model=model,
+                    contents=prompt
+                )
+                # The API returns the generated text in the 'text' attribute.
+                text_response = response.text
+                # Optionally, add the assistant's response to the conversation history.
+                self.add_llm_conversation(text_response, "assistant")
+                return text_response
+            
+            except Exception as e:
+                print(f"Error with model {model}: {e}")
+                if attempt < 4:
+                    print("Retrying...")
+                    print("Waiting for 120 seconds before retrying...")
+                    time.sleep(120)
+                else:
+                    print(f"Failed with model: {model} after 5 attempts")
+                    break  # Exit the loop after 5 failed attempts
         
-        raise Exception("All models failed after 5 attempts each.")
-
+        raise Exception(f"{model} failed after 5 attempts.")
     
     def get_action(self, state, env):
         """
@@ -179,23 +208,32 @@ class LLMBrain:
         llm_response = self.query_llm()
         print(f"LLM raw response:\n{llm_response}")
 
-        try:
-            new_entries = json.loads(llm_response)
+        # Define a regex pattern to extract the JSON content from a code block.
+        # This pattern looks for a block starting with "```json", captures everything until the closing "```"
+        pattern = r"```json\s*(\{.*?\})\s*```"
 
-            # 'new_entries' is a dict with a key "Q-Table" that holds the actual list.
-            q_table_list = new_entries["Q-Table"]
+        # Use re.DOTALL so that '.' matches newline characters as well.
+        match = re.search(pattern, llm_response, re.DOTALL)
 
-            for entry in q_table_list:
-                state_list = entry["state"]
-                action     = entry["action"]
-                q_value    = entry["q_value"]
-                # Convert state list to tuple
-                state_tuple = tuple(state_list)
-                # Add to Q-table memory
-                self.q_table.table.append((state_tuple, action, q_value))
-        
-        except json.JSONDecodeError:
-            print("Error: LLM did not return valid JSON. No update performed.")
+        if match:
+            json_str = match.group(1)  # The captured JSON string without the markdown formatting
+            try:
+                new_entries = json.loads(json_str)
+
+                # 'new_entries' should be a dict with a key "Q-Table" that holds a list of entries.
+                q_table_list = new_entries.get("Q-Table", [])
+                for entry in q_table_list:
+                    state_list = entry["state"]
+                    action     = entry["action"]
+                    q_value    = entry["q_value"]
+                    # Convert the state list to a tuple
+                    state_tuple = tuple(state_list)
+                    # Add to Q-table memory
+                    self.q_table.table.append((state_tuple, action, q_value))
+            except json.JSONDecodeError:
+                print("Error: Extracted JSON is invalid. No update performed.")
+        else:
+            print("Error: No JSON block found in the LLM response. No update performed.")
 
 
 
