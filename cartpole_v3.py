@@ -10,6 +10,7 @@ from google import genai
 # -------------
 from openai import OpenAI
 import json  # used for JSON parsing/formatting
+import csv
 
 API_KEY = os.getenv('apiKey')
 BASE_URL = os.getenv('baseURL')
@@ -207,8 +208,8 @@ class LLMBrain:
                 print(f"Error with model {model}: {e}")
                 if attempt < 4:
                     print("Retrying...")
-                    print("Waiting for 120 seconds before retrying...")
-                    time.sleep(120)
+                    print("Waiting for 60 seconds before retrying...")
+                    time.sleep(60)
                 else:
                     print(f"Failed with model: {model} after 5 attempts")
                     break  # Exit the loop after 5 failed attempts
@@ -302,6 +303,17 @@ pos_bin | vel_bin | angle_bin | angvel_bin | action
 
 
 # --------------------------------
+#  Helper function for smoothing data
+# --------------------------------
+def smooth_data(data, window=5):
+    """
+    Smooths the data using a simple moving average with the given window size.
+    Returns an array of the smoothed values.
+    """
+    return np.convolve(data, np.ones(window) / window, mode='valid')
+
+
+# --------------------------------
 #  MAIN LOOP
 # --------------------------------
 def main():
@@ -312,7 +324,7 @@ def main():
     folder = './cartpole_llm_no_q_logs/'
     os.makedirs(folder, exist_ok=True)
 
-    NUM_EPISODES = 80
+    NUM_EPISODES = 100
     
     # -- Lists to store rewards for plotting --
     training_rewards = []
@@ -407,27 +419,56 @@ def main():
     env.close()
 
     # -------------------
-    #  Plotting Results
+    #  Save Plot Values and Figures
     # -------------------
-    # Plot training episode rewards
+    # Save the training rewards and average test rewards to a CSV file
+    csv_filename = "plot_values.csv"
+    with open(csv_filename, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["Episode", "Training Reward", "Avg Test Reward"])
+        for i in range(len(training_rewards)):
+            writer.writerow([i+1, training_rewards[i], test_avg_rewards[i]])
+    print(f"Saved plot values to {csv_filename}")
+
+    # --- Plotting with smoothing ---
+    # Define the moving average window size (adjust as needed)
+    window_size = 5
+
+    # Smooth the training rewards
+    smoothed_training = smooth_data(training_rewards, window=window_size)
+    # Since smoothing reduces the length, adjust the x-axis accordingly.
+    training_x = np.arange(window_size - 1, len(training_rewards))
+
     plt.figure(figsize=(8, 4))
-    plt.plot(training_rewards, label='Training Rewards')
+    plt.plot(training_rewards, label='Training Rewards', alpha=0.3, marker='o')
+    plt.plot(training_x, smoothed_training, label='Smoothed Trend', color='blue', linewidth=2)
     plt.xlabel('Episode')
     plt.ylabel('Total Reward')
     plt.title('Training Episode Rewards')
     plt.legend()
     plt.tight_layout()
+    training_plot_filename = "training_rewards_smoothed.png"
+    plt.savefig(training_plot_filename)
+    print(f"Saved training rewards plot to {training_plot_filename}")
     plt.show()
 
-    # Plot average test rewards (post-update each episode)
+    # Smooth the average test rewards
+    smoothed_test = smooth_data(test_avg_rewards, window=window_size)
+    test_x = np.arange(window_size - 1, len(test_avg_rewards))
+
     plt.figure(figsize=(8, 4))
-    plt.plot(test_avg_rewards, label='Avg Test Rewards', color='orange')
+    plt.plot(test_avg_rewards, label='Avg Test Rewards', color='orange', alpha=0.3, marker='o')
+    plt.plot(test_x, smoothed_test, label='Smoothed Trend', color='red', linewidth=2)
     plt.xlabel('Episode')
     plt.ylabel('Average Reward (5 tests)')
     plt.title('Average Test Rewards (every LLM policy update)')
     plt.legend()
     plt.tight_layout()
+    test_plot_filename = "avg_test_rewards_smoothed.png"
+    plt.savefig(test_plot_filename)
+    print(f"Saved average test rewards plot to {test_plot_filename}")
     plt.show()
+
 
 if __name__ == "__main__":
     main()
