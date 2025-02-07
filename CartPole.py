@@ -104,7 +104,7 @@ class LLMBrain:
     #                 return response
     #             except Exception as e:
     #                 print(f"Error with model {model}: {e}")
-    #                 if attempt < 4:
+    #                 if attempt < 4: 
     #                     print("Retrying...")
     #                     print("Waiting for 120 seconds before retrying...")
     #                     time.sleep(120)
@@ -141,6 +141,7 @@ class LLMBrain:
                     break  # Exit the loop after 5 failed attempts
         
         raise Exception(f"{model} failed after 5 attempts.")
+    
     
     def get_action(self, state, env):
         """
@@ -248,7 +249,7 @@ if __name__ == "__main__":
     os.makedirs(folder, exist_ok=True)
 
     # Number of training episodes
-    num_episodes = 10
+    num_episodes = 100
 
     for episode in range(num_episodes):
         state, _ = env.reset()

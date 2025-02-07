@@ -374,7 +374,7 @@ def main():
                     f.write(f"{step_id} | {state} | {disc_st} | {action} | {reward}\n")
 
                     state = next_state
-                    if done or step_id >= 00:
+                    if done or step_id >= 200:
                         print(f"[Test] Ep {episode+1}, Test {test_i+1} ended. R: {total_test_reward}")
                         break
                 f.write(f"Total Reward: {total_test_reward}\n")
