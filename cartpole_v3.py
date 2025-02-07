@@ -9,11 +9,12 @@ from google import genai
 # LLM IMPORTS
 # -------------
 from openai import OpenAI
-import json  # used for an optional JSON parse attempt
+import json  # used for JSON parsing/formatting
 
 API_KEY = os.getenv('apiKey')
 BASE_URL = os.getenv('baseURL')
 GEMINI_API_KEY = os.getenv('geminiApiKey')
+
 
 # --------------------------------
 #  MemoryTable for Rewards
@@ -38,6 +39,24 @@ class MemoryTable:
         for (s, a, r) in self.table:
             lines.append(f"{s} | {a} | {r}")
         return header + "\n".join(lines)
+
+    def to_json(self, total_reward=None):
+        """
+        Convert the reward table to a JSON-formatted string.
+        Each entry is a dict with keys: state, action, reward.
+        Optionally include the total_reward.
+        """
+        rewards_list = []
+        for (s, a, r) in self.table:
+            rewards_list.append({
+                "state": [int(x) for x in s],
+                "action": int(a),
+                "reward": float(r) if isinstance(r, np.floating) else int(r) if isinstance(r, np.integer) else r
+            })
+        data = {"rewards": rewards_list}
+        if total_reward is not None:
+            data["total_reward"] = float(total_reward) if isinstance(total_reward, np.floating) else int(total_reward) if isinstance(total_reward, np.integer) else total_reward
+        return json.dumps(data, indent=2)
 
 
 # --------------------------------
@@ -107,7 +126,8 @@ class LLMBrain:
         # Number of actions in CartPole
         self.action_space_n = env_action_space_n
 
-        # Store a history of reward tables (as strings) from past episodes.
+        # Store a history of reward tables.
+        # Now each entry is a tuple: (total_reward, reward_table_json_string)
         self.reward_history = []
 
     def reset_llm_conversation(self):
@@ -197,39 +217,39 @@ class LLMBrain:
 
     def llm_update_policy(self):
         """
-        Provide the reward table history (last 10 episodes) + existing policy to the LLM,
+        Provide the reward table history (from the best 5 episodes) + existing policy to the LLM,
         ask for an updated policy. Then parse it.
         """
         self.reset_llm_conversation()
 
-        # Concatenate the last 10 reward tables (if available)
-        reward_history_str = "\n\n".join(self.reward_history[-10:])
-
+        # -----------------------------
+        # Select the best 5 reward tables based on total reward
+        # and combine them into a JSON array.
+        # -----------------------------
+        if self.reward_history:
+            sorted_reward_history = sorted(self.reward_history, key=lambda x: x[0], reverse=True)
+            best_reward_history = sorted_reward_history[:5]
+            # Convert each JSON string back into a dict and then re-dump as an array.
+            reward_history_json = json.dumps([json.loads(entry[1]) for entry in best_reward_history], indent=2)
+        else:
+            reward_history_json = "[]"
+        
         # Build a system/user prompt
         system_prompt = f"""
 You are an AI that decides a simple tabular policy for CartPole.
 The environment has 4 discrete dimensions (pos_bin, vel_bin, angle_bin, angvel_bin)
 and 2 possible actions (0 or 1).
 
-Generate and run code for the calculation of the new policy based on the reward table history and the old policy.
 
-We have a history of immediate rewards from the last 10 episodes (state, action, reward).
-We also have the old policy table (mapping state->action).
-We want you to propose a new policy.
-
-Format the new policy as lines:
-  pos_bin | vel_bin | angle_bin | angvel_bin | action
-
-where "action" is either 0 or 1.
-Only output these lines (no explanations).
+Note: The reward tables are provided in JSON format for easy parsing.
         """
 
         old_policy_str = self.policy_table.to_string()
 
         user_prompt = f"""
 ---------------------
-Reward Table History (last 10 episodes):
-{reward_history_str}
+Reward Table History (best 5 episodes) in JSON format:
+{reward_history_json}
 
 ---------------------
 Old Policy Table:
@@ -292,7 +312,7 @@ def main():
     folder = './cartpole_llm_no_q_logs/'
     os.makedirs(folder, exist_ok=True)
 
-    NUM_EPISODES = 150
+    NUM_EPISODES = 80
     
     # -- Lists to store rewards for plotting --
     training_rewards = []
@@ -336,13 +356,12 @@ def main():
         # Track the training reward for plotting
         training_rewards.append(total_reward)
         
-        # Save the current episode's reward table into the history (keeping only the last 10)
-        reward_snapshot = llm_brain.reward_table.to_string()
-        llm_brain.reward_history.append(reward_snapshot)
-        if len(llm_brain.reward_history) > 10:
-            llm_brain.reward_history.pop(0)
+        # Save the current episode's reward table along with its total reward,
+        # using JSON for easier parsing by the LLM.
+        reward_snapshot = llm_brain.reward_table.to_json(total_reward)
+        llm_brain.reward_history.append((total_reward, reward_snapshot))
 
-        # Now ask LLM to provide a new policy using the reward history
+        # Now ask LLM to provide a new policy using the best 5 reward histories
         llm_brain.llm_update_policy()
 
         # Save the new policy to file
