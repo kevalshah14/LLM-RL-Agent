@@ -1,4 +1,2 @@
 *.env
-mountain_car_logs
-cartpole_logs
-cartpole_llm_no_q_logs
+*_logs

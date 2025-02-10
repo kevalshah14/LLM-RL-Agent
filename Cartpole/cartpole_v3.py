@@ -2,37 +2,38 @@ import gymnasium as gym
 import numpy as np
 import os
 import time
-import matplotlib.pyplot as plt  # <-- for plotting
-from google import genai
+import matplotlib.pyplot as plt  
 
-# -------------
-# LLM IMPORTS
-# -------------
+# ---------------------------
+# LLM and Utility Imports
+# ---------------------------
 from openai import OpenAI
-import json  # used for JSON parsing/formatting
-import csv
+from google import genai
+import json 
+import csv  
 
+# Retrieve API keys and base URLs from environment variables
 API_KEY = os.getenv('apiKey')
 BASE_URL = os.getenv('baseURL')
 GEMINI_API_KEY = os.getenv('geminiApiKey')
 
 
-# --------------------------------
-#  MemoryTable for Rewards
-# --------------------------------
+# --------------------------------------
+# MemoryTable: Stores (state, action, reward)
+# --------------------------------------
 class MemoryTable:
     """
-    A simple table storing (state, action, reward).
-    We'll pass these to the LLM so it can figure out
-    how to update the policy (instead of Q-values).
+    A simple container to store triplets of (state, action, reward).
+    These entries are later sent to the LLM so it can learn and update the policy.
     """
     def __init__(self):
         self.table = []
 
     def to_string(self):
         """
-        Convert to lines: "state | action | reward"
-        where state is a 4D tuple of discrete bins.
+        Return a string representation of the table with headers.
+        Each line has the format:
+            "state (pos,vel,angle,angvel) | action | reward"
         """
         header = "state (pos,vel,angle,angvel) | action | reward\n"
         header += "--------------------------------------------\n"
@@ -43,9 +44,9 @@ class MemoryTable:
 
     def to_json(self, total_reward=None):
         """
-        Convert the reward table to a JSON-formatted string.
-        Each entry is a dict with keys: state, action, reward.
-        Optionally include the total_reward.
+        Convert the reward table into a JSON-formatted string.
+        Each entry is a dictionary with keys: state, action, reward.
+        Optionally includes the total_reward of an episode.
         """
         rewards_list = []
         for (s, a, r) in self.table:
@@ -60,23 +61,22 @@ class MemoryTable:
         return json.dumps(data, indent=2)
 
 
-# --------------------------------
-#  PolicyTable
-# --------------------------------
+# --------------------------------------
+# PolicyTable: Maps discretized states to best action
+# --------------------------------------
 class PolicyTable:
     """
-    Stores a mapping from discrete states -> best action.
-    We'll ask the LLM to produce lines like:
-      pos_bin | vel_bin | angle_bin | angvel_bin | action
-    and parse them here.
+    Stores the learned mapping from discrete states to the optimal action.
+    The expected format for each policy entry is:
+        pos_bin | vel_bin | angle_bin | angvel_bin | action
     """
     def __init__(self):
-        self.table = []  # list of (state_tuple, action)
+        # Each entry is a tuple: (state_tuple, action)
+        self.table = []
 
     def to_string(self):
         """
-        Convert the policy table to lines:
-        "pos_bin | vel_bin | angle_bin | angvel_bin | action"
+        Return a string representation of the policy table with headers.
         """
         header = "pos_bin | vel_bin | angle_bin | angvel_bin | action\n"
         header += "-------------------------------------------\n"
@@ -88,7 +88,8 @@ class PolicyTable:
 
     def get_dict(self):
         """
-        Convert to a dict: dict[state_tuple] = action
+        Convert the list of policy entries into a dictionary for easy lookup:
+            dict[state_tuple] = action
         """
         d = {}
         for (s, a) in self.table:
@@ -96,57 +97,70 @@ class PolicyTable:
         return d
 
 
-# --------------------------------
-#  LLMBrain
-# --------------------------------
+# --------------------------------------
+# LLMBrain: Uses an LLM to update and refine the policy
+# --------------------------------------
 class LLMBrain:
     def __init__(self,
                  num_buckets=(10, 10, 20, 20),
                  env_action_space_n=2):
+        # Instantiate the LLM client
         # self.client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
         self.client = genai.Client(api_key=GEMINI_API_KEY)
 
-        # Where we store immediate rewards observed each episode
+        # Memory table for storing immediate rewards during an episode
         self.reward_table = MemoryTable()
 
-        # A policy table (state -> action)
+        # Table mapping discretized states to best actions
         self.policy_table = PolicyTable()
 
-        # LLM conversation context
+        # List to store the conversation history with the LLM
         self.llm_conversation = []
 
-        # Discretization settings for CartPole
+        # Discretization configuration for the CartPole state space.
+        # Each state (cart position, cart velocity, pole angle, pole angular velocity)
+        # will be discretized into a fixed number of buckets.
         self.num_buckets = num_buckets
         self.state_bounds = [
-            (-4.8, 4.8),     # cart position
-            (-3.0, 3.0),     # cart velocity
-            (-0.418, 0.418), # pole angle (~±24 degrees)
-            (-4.0, 4.0)      # pole angular velocity
+            (-4.8, 4.8),     # Cart position bounds
+            (-3.0, 3.0),     # Cart velocity bounds
+            (-0.418, 0.418), # Pole angle bounds (approximately ±24 degrees)
+            (-4.0, 4.0)      # Pole angular velocity bounds
         ]
 
-        # Number of actions in CartPole
+        # Number of actions available in CartPole (typically 2: left or right)
         self.action_space_n = env_action_space_n
 
-        # Store a history of reward tables.
-        # Now each entry is a tuple: (total_reward, reward_table_json_string)
+        # History of reward tables from episodes.
+        # Each entry is a tuple: (total_reward, reward_table_json_string)
         self.reward_history = []
 
     def reset_llm_conversation(self):
+        """Reset the conversation history with the LLM."""
         self.llm_conversation = []
 
     def add_llm_conversation(self, text, role):
         """
-        role: "user", "assistant", "system"
+        Append a new message to the LLM conversation history.
+        role: "user", "assistant", or "system"
         """
         self.llm_conversation.append({"role": role, "content": text})
 
     def discretize_state(self, obs):
         """
-        Convert a continuous CartPole state to a 4D discrete state.
+        Convert the continuous state from the CartPole environment into a discrete state.
+        Each dimension is scaled to a value between 0 and (num_buckets-1) based on predefined bounds.
+        
+        Args:
+            obs: The continuous state (list or tuple of 4 values).
+            
+        Returns:
+            A tuple of discretized indices.
         """
         ratios = []
         for i, val in enumerate(obs):
             low, high = self.state_bounds[i]
+            # Clip the value to lie within the specified bounds
             clipped = max(min(val, high), low)
             ratio = (clipped - low) / (high - low)
             ratios.append(ratio)
@@ -154,6 +168,7 @@ class LLMBrain:
         discrete_indices = []
         for i, ratio in enumerate(ratios):
             nb = self.num_buckets[i]
+            # Map the continuous ratio to a discrete bucket index
             idx = int(round((nb - 1) * ratio))
             discrete_indices.append(idx)
 
@@ -161,11 +176,19 @@ class LLMBrain:
 
     def get_action(self, state, env):
         """
-        Return the policy's action for the given state (discretized).
-        If we don't know, pick random.
+        Determine the action to take given the current state.
+        Uses the learned policy if available; otherwise, selects a random action.
+        
+        Args:
+            state: The current continuous state.
+            env: The environment (used for random action sampling if needed).
+            
+        Returns:
+            An integer representing the action.
         """
         disc_state = self.discretize_state(state)
         policy_dict = self.policy_table.get_dict()
+        # Return the learned action if this state exists in the policy, else random action.
         if disc_state in policy_dict:
             return policy_dict[disc_state]
         else:
@@ -173,16 +196,17 @@ class LLMBrain:
 
     def add_to_reward_table(self, state, action, reward):
         """
-        Store the immediate reward for (state, action).
+        Save the observed (discretized) state, action, and immediate reward to the reward table.
         """
         disc_state = self.discretize_state(state)
         self.reward_table.table.append((disc_state, action, reward))
 
     def query_llm(self):
         """
-        Send the conversation to the LLM and get the response text.
-        Added debug prints to show the raw response.
+        Send the current conversation (context + prompt) to the LLM and return its response.
+        Retries up to 5 times if an error occurs.
         """
+        # Build the prompt by concatenating all messages from the conversation history.
         prompt = " ".join(msg.get("content", "") for msg in self.llm_conversation)
         model = "gemini-2.0-flash"
         
@@ -196,11 +220,11 @@ class LLMBrain:
                 # The API returns the generated text in the 'text' attribute.
                 text_response = response.text
 
-                # DEBUG: Print the raw LLM response
+                # DEBUG: Output the raw response from the LLM.
                 print("LLM raw response:")
                 print(text_response)
                 
-                # Optionally, add the assistant's response to the conversation history.
+                # Append the LLM's answer to the conversation history.
                 self.add_llm_conversation(text_response, "assistant")
                 return text_response
             
@@ -212,83 +236,97 @@ class LLMBrain:
                     time.sleep(60)
                 else:
                     print(f"Failed with model: {model} after 5 attempts")
-                    break  # Exit the loop after 5 failed attempts
+                    break  # Exit after 5 failed attempts
         
         raise Exception(f"{model} failed after 5 attempts.")
 
     def llm_update_policy(self):
         """
-        Provide the reward table history (from the best 5 episodes) + existing policy to the LLM,
-        ask for an updated policy. Then parse it.
+        Use the LLM to generate an updated policy based on the best reward histories.
+        
+        The process involves:
+          1. Selecting the best 5 episodes (by total reward) from the reward history.
+          2. Creating a prompt that includes these reward tables (in JSON format)
+             and the current policy table.
+          3. Sending this prompt to the LLM and parsing its output.
+          4. Updating the local policy table with the newly generated policy.
         """
+        # Reset conversation history before constructing a new prompt.
         self.reset_llm_conversation()
 
         # -----------------------------
-        # Select the best 5 reward tables based on total reward
-        # and combine them into a JSON array.
+        # Select the best 5 episodes from reward_history
         # -----------------------------
         if self.reward_history:
+            # Sort reward history by total reward in descending order.
             sorted_reward_history = sorted(self.reward_history, key=lambda x: x[0], reverse=True)
             best_reward_history = sorted_reward_history[:5]
-            # Convert each JSON string back into a dict and then re-dump as an array.
+            # Convert each reward table JSON string back into a dict and then dump as a JSON array.
             reward_history_json = json.dumps([json.loads(entry[1]) for entry in best_reward_history], indent=2)
         else:
             reward_history_json = "[]"
         
-        # Build a system/user prompt
+        # -----------------------------
+        # Build system and user prompts for the LLM
+        # -----------------------------
         system_prompt = f"""
-You are an AI that decides a simple tabular policy for CartPole.
-The environment has 4 discrete dimensions (pos_bin, vel_bin, angle_bin, angvel_bin)
-and 2 possible actions (0 or 1).
+        You are an AI that decides a simple tabular policy for CartPole.
+        The environment has 4 discrete dimensions (pos_bin, vel_bin, angle_bin, angvel_bin)
+        and 2 possible actions (0 or 1).
 
-
-Note: The reward tables are provided in JSON format for easy parsing.
+        Note: The reward tables are provided in JSON format for easy parsing.
         """
 
+        # Get the current policy as a formatted string.
         old_policy_str = self.policy_table.to_string()
 
         user_prompt = f"""
----------------------
-Reward Table History (best 5 episodes) in JSON format:
-{reward_history_json}
+        ---------------------
+        Reward Table History (best 5 episodes) in JSON format:
+        {reward_history_json}
 
----------------------
-Old Policy Table:
-{old_policy_str}
+        ---------------------
+        Old Policy Table:
+        {old_policy_str}
 
-Please output ONLY the new policy in lines of:
-pos_bin | vel_bin | angle_bin | angvel_bin | action
+        Please output ONLY the new policy in lines of:
+        pos_bin | vel_bin | angle_bin | angvel_bin | action
         """
 
+        # Add the system and user messages to the conversation.
         self.add_llm_conversation(system_prompt, "system")
         self.add_llm_conversation(user_prompt, "user")
 
-        # Query the LLM
+        # Send the prompt to the LLM and obtain its response.
         new_policy_str = self.query_llm()
 
-        # DEBUG: Print the LLM response before attempting to parse it
+        # DEBUG: Print the LLM response for debugging purposes.
         print("LLM Response:")
         print(new_policy_str)
 
-        # Attempt to parse JSON if the LLM returned JSON (not expected but for debugging)
+        # Attempt to parse the LLM response as JSON (if applicable)
         try:
             policy_json = json.loads(new_policy_str)
             print("Successfully parsed JSON from LLM response.")
         except json.JSONDecodeError:
             print("LLM response is not valid JSON. Proceeding with text line parsing.")
 
-        # Now parse `new_policy_str`
-        # Clear old policy
+        # -----------------------------
+        # Parse the LLM response to update the policy table
+        # -----------------------------
+        # Clear the old policy entries
         self.policy_table.table = []
         parsed_count = 0
 
+        # Expecting one policy entry per line, with each line having 5 fields separated by '|'
         for line in new_policy_str.split("\n"):
             line = line.strip()
             if not line:
-                continue
+                continue  # Skip empty lines
             parts = line.split("|")
             if len(parts) == 5:
                 try:
+                    # Convert each part to an integer after stripping whitespace.
                     p_bin = int(parts[0].strip())
                     v_bin = int(parts[1].strip())
                     ang_bin = int(parts[2].strip())
@@ -302,52 +340,65 @@ pos_bin | vel_bin | angle_bin | angvel_bin | action
         print(f"Successfully parsed {parsed_count} policy entries from LLM response.")
 
 
-# --------------------------------
-#  Helper function for smoothing data
-# --------------------------------
+# --------------------------------------
+# Helper Function: Data Smoothing for Plotting
+# --------------------------------------
 def smooth_data(data, window=5):
     """
-    Smooths the data using a simple moving average with the given window size.
-    Returns an array of the smoothed values.
+    Smooth the input data using a simple moving average.
+    
+    Args:
+        data (list or array): Data to smooth.
+        window (int): The window size for the moving average.
+    
+    Returns:
+        The smoothed data as a NumPy array.
     """
     return np.convolve(data, np.ones(window) / window, mode='valid')
 
 
-# --------------------------------
-#  MAIN LOOP
-# --------------------------------
+# --------------------------------------
+# Main Loop: Train and Test Policy using LLM Updates
+# --------------------------------------
 def main():
+    # Initialize the CartPole environment without rendering.
     env = gym.make('CartPole-v1', render_mode=None)
+    
+    # Create an instance of the LLMBrain with discretization settings.
     llm_brain = LLMBrain(num_buckets=(10, 10, 20, 20),
                          env_action_space_n=env.action_space.n)
 
+    # Folder to store logs and output files.
     folder = './cartpole_llm_no_q_logs/'
     os.makedirs(folder, exist_ok=True)
 
-    NUM_EPISODES = 100
+    NUM_EPISODES = 100  # Total number of training episodes
     
-    # -- Lists to store rewards for plotting --
-    training_rewards = []
-    test_avg_rewards = []  # We'll store the average reward across 5 tests
+    # Lists to store rewards for later plotting.
+    training_rewards = []    # Total reward per training episode.
+    test_avg_rewards = []    # Average reward over 5 test episodes after each training episode.
     
     for episode in range(NUM_EPISODES):
-        # Clear old reward table for each new episode
+        # Clear the reward table at the start of each training episode.
         llm_brain.reward_table.table = []
 
+        # Reset the environment to start a new episode.
         state, _ = env.reset()
         done = False
         step_id = 0
         total_reward = 0
 
-        # Logging
+        # Create a folder for the current episode's logs.
         episode_folder = os.path.join(folder, f"episode_{episode+1}")
         os.makedirs(episode_folder, exist_ok=True)
         train_file = os.path.join(episode_folder, "training_episode.txt")
 
+        # Open a file to log the training episode details.
         with open(train_file, 'w') as f:
             f.write(f"Episode {episode+1}\n")
             f.write("Step | State (continuous) | Discretized State | Action | Reward\n")
 
+            # Run the training episode until termination or max steps reached.
             while not done:
                 step_id += 1
                 action = llm_brain.get_action(state, env)
@@ -365,23 +416,24 @@ def main():
                     break
             f.write(f"Total Reward: {total_reward}\n")
         
-        # Track the training reward for plotting
+        # Store training reward for this episode.
         training_rewards.append(total_reward)
         
-        # Save the current episode's reward table along with its total reward,
-        # using JSON for easier parsing by the LLM.
+        # Save the current episode's reward table as a JSON snapshot.
         reward_snapshot = llm_brain.reward_table.to_json(total_reward)
         llm_brain.reward_history.append((total_reward, reward_snapshot))
 
-        # Now ask LLM to provide a new policy using the best 5 reward histories
+        # Update the policy using the LLM with the best 5 reward histories.
         llm_brain.llm_update_policy()
 
-        # Save the new policy to file
+        # Save the new policy table to file.
         policy_file = os.path.join(episode_folder, "policy_table.txt")
         with open(policy_file, 'w') as f:
             f.write(llm_brain.policy_table.to_string())
 
-        # Test the new policy
+        # -------------------------------
+        # Test the new policy over a few episodes.
+        # -------------------------------
         TEST_EPISODES = 5
         test_rewards_this_update = []
         for test_i in range(TEST_EPISODES):
@@ -390,6 +442,7 @@ def main():
             step_id = 0
             total_test_reward = 0
 
+            # Log details for each test episode.
             test_file = os.path.join(episode_folder, f"testing_episode_{test_i+1}.txt")
             with open(test_file, 'w') as f:
                 f.write(f"Testing Episode {test_i+1}\n")
@@ -412,16 +465,16 @@ def main():
 
             test_rewards_this_update.append(total_test_reward)
 
-        # Store the average test reward for plotting
+        # Calculate and record the average reward across the test episodes.
         avg_test_reward = np.mean(test_rewards_this_update)
         test_avg_rewards.append(avg_test_reward)
 
+    # Close the environment once all episodes are complete.
     env.close()
 
     # -------------------
-    #  Save Plot Values and Figures
+    # Save training and test reward values to CSV for later analysis.
     # -------------------
-    # Save the training rewards and average test rewards to a CSV file
     csv_filename = "plot_values.csv"
     with open(csv_filename, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
@@ -430,13 +483,15 @@ def main():
             writer.writerow([i+1, training_rewards[i], test_avg_rewards[i]])
     print(f"Saved plot values to {csv_filename}")
 
-    # --- Plotting with smoothing ---
-    # Define the moving average window size (adjust as needed)
+    # -------------------
+    # Plotting: Training and Test Rewards with Smoothing
+    # -------------------
+    # Define a window size for the moving average.
     window_size = 5
 
-    # Smooth the training rewards
+    # Smooth the training rewards.
     smoothed_training = smooth_data(training_rewards, window=window_size)
-    # Since smoothing reduces the length, adjust the x-axis accordingly.
+    # Adjust x-axis indices to match the smoothed data length.
     training_x = np.arange(window_size - 1, len(training_rewards))
 
     plt.figure(figsize=(8, 4))
@@ -452,7 +507,7 @@ def main():
     print(f"Saved training rewards plot to {training_plot_filename}")
     plt.show()
 
-    # Smooth the average test rewards
+    # Smooth the average test rewards.
     smoothed_test = smooth_data(test_avg_rewards, window=window_size)
     test_x = np.arange(window_size - 1, len(test_avg_rewards))
 
@@ -470,5 +525,6 @@ def main():
     plt.show()
 
 
+# Entry point: Start the main training and testing loop.
 if __name__ == "__main__":
     main()

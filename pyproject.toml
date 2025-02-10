@@ -7,11 +7,14 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.11"
-gymnasium = {extras = ["classic-control"], version = "^1.0.0"}
+gymnasium = {extras = ["box2d"], version = "^1.0.0"}
 openai = "^1.57.2"
 numpy = "^2.2.0"
 matplotlib = "^3.10.0"
 google-genai = "^1.0.0"
+swig = "^4.3.0"
+gym = "^0.26.2"
+stable-baselines3 = "^2.5.0"
 
 
 [build-system]

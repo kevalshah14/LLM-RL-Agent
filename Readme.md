@@ -2,6 +2,31 @@
 
 This project implements reinforcement learning agents for various environments using large language models (LLMs).
 
+## Project Structure
+
+```
+.env
+.gitignore
+BipeadalWalker/
+    BipedalWalker.py
+Cartpole/
+    cartpole_v2.py
+    cartpole_v3.py
+    CartPole_Without_LLM.py
+    CartPole.py
+    Improvements.md
+FrozenLake/
+    frozenlake_avg_test_rewards_smoothed1.png
+    frozenlake_plot_values.csv
+    frozenlake_training_rewards_smoothed1.png
+    FrozenLake.py
+MountainCar/
+    MountainCar_v2.py
+    MountainCar.py
+poetry.lock
+pyproject.toml
+README.md
+```
 
 ## Requirements
 
@@ -9,6 +34,9 @@ This project implements reinforcement learning agents for various environments u
 - Gymnasium
 - OpenAI
 - NumPy
+- Matplotlib
+- Google GenAI
+- Stable Baselines3
 
 ## Installation
 
@@ -29,14 +57,28 @@ This project implements reinforcement learning agents for various environments u
 
 To run the CartPole agent:
 ```sh
-python CartPole.py
+python Cartpole/CartPole.py
 ```
 
 ### MountainCar
 
 To run the MountainCar agent:
 ```sh
-python MountainCar.py
+python MountainCar/MountainCar.py
+```
+
+### FrozenLake
+
+To run the FrozenLake agent:
+```sh
+python FrozenLake/FrozenLake.py
+```
+
+### BipedalWalker
+
+To run the BipedalWalker agent:
+```sh
+python BipeadalWalker/BipedalWalker.py
 ```
 
 ## Project Details
@@ -49,5 +91,14 @@ The CartPole agent logs its Q-table and testing results in the `cartpole_logs` d
 
 The MountainCar agent logs its results in the `mountain_car_logs` directory.
 
+### FrozenLake
+
+The FrozenLake agent logs its results in the `frozenlake_logs` directory.
+
+### BipedalWalker
+
+The BipedalWalker agent logs its results in the `bipedalwalker_logs` directory.
+
 ## License
+
 This project is licensed under the MIT License.
