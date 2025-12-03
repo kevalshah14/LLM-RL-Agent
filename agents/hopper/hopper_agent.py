@@ -297,14 +297,33 @@ class LLMBrain:
 
     def llm_update_policy(self):
         """
-        Use the LLM to generate an updated policy based on the best reward histories.
+        Use the LLM to generate an updated policy based on the best and worst reward histories.
         """
         self.reset_llm_conversation()
 
         if self.reward_history:
             sorted_reward_history = sorted(self.reward_history, key=lambda x: x[0], reverse=True)
-            best_reward_history = sorted_reward_history[:5]
-            reward_history_json = json.dumps([json.loads(entry[1]) for entry in best_reward_history], indent=2)
+            best_reward_history = sorted_reward_history[:4]
+            
+            # Include one bad episode to teach what NOT to do
+            worst_reward_history = []
+            if len(sorted_reward_history) > 5:
+                worst_episode = sorted_reward_history[-1]
+                worst_reward_history = [worst_episode]
+            
+            # Combine best and worst episodes with labels
+            combined_history = []
+            for entry in best_reward_history:
+                episode_data = json.loads(entry[1])
+                episode_data["label"] = "GOOD"
+                combined_history.append(episode_data)
+            
+            for entry in worst_reward_history:
+                episode_data = json.loads(entry[1])
+                episode_data["label"] = "BAD - AVOID THESE PATTERNS"
+                combined_history.append(episode_data)
+            
+            reward_history_json = json.dumps(combined_history, indent=2)
         else:
             reward_history_json = "[]"
         
@@ -340,7 +359,7 @@ class LLMBrain:
 
         user_prompt = f"""
         ---------------------
-        Reward Table History (best 5 episodes) in JSON format:
+        Reward Table History (4 GOOD + 1 BAD episode) in JSON format:
         {reward_history_json}
 
         ---------------------
@@ -348,12 +367,13 @@ class LLMBrain:
         {old_policy_str}
 
         INSTRUCTIONS:
-        1. Analyze the successful episodes to find patterns in (State -> Action) mapping.
-        2. Generate a NEW Policy Table.
-        3. Ensure you address the critical states:
+        1. Analyze the GOOD episodes to find patterns in (State -> Action) mapping.
+        2. Analyze the BAD episode (if present) to identify patterns to AVOID.
+        3. Generate a NEW Policy Table that maximizes good patterns and avoids bad patterns.
+        4. Ensure you address the critical states:
            - If z_pos=0 (Low), actions should extend leg to recover.
            - If angle=2 (Forward), thigh should retract to balance.
-        4. Output ONLY the policy rows - NO explanations, NO markdown code blocks, NO headers, NO extra text.
+        5. Output ONLY the policy rows - NO explanations, NO markdown code blocks, NO headers, NO extra text.
 
         FORMAT (output EXACTLY this format for each policy entry):
         z_pos | angle | thigh | leg | foot | x_vel | z_vel | angle_vel | thigh_vel | leg_vel | foot_vel | act_0 | act_1 | act_2
@@ -399,6 +419,13 @@ class LLMBrain:
                     print(f"Failed to parse line: {line}")
         
         print(f"Successfully parsed {parsed_count} policy entries from LLM response.")
+        
+        # -----------------------------
+        # Validate the candidate policy
+        # -----------------------------
+        if parsed_count < 10:
+            print(f"WARNING: Policy only has {parsed_count} entries (expected ~30+). Keeping old policy.")
+            return  # Don't update - likely a parsing failure
         
         # Update the current policy table to this new candidate
         self.policy_table.table = candidate_policy_table
@@ -477,7 +504,8 @@ def main():
         # 2. TESTING PHASE
         # ----------------
         # Evaluate the current policy to see if it's better than our Best Policy
-        TEST_EPISODES = 5
+        # Use dynamic number: start with 3, increase to 10 over time
+        TEST_EPISODES = min(3 + episode // 20, 10)
         test_rewards_this_update = []
         
         for test_i in range(TEST_EPISODES):

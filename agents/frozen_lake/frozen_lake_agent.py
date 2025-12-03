@@ -4,6 +4,7 @@ import os
 import time
 import matplotlib.pyplot as plt  # for plotting
 from google import genai
+import copy
 
 # -------------
 # LLM IMPORTS
@@ -111,6 +112,10 @@ class LLMBrain:
 
         # A policy table (state -> action)
         self.policy_table = PolicyTable()
+        
+        # Store the BEST policy seen so far to prevent catastrophic forgetting
+        self.best_policy_table = PolicyTable()
+        self.best_avg_test_reward = -float('inf')
 
         # LLM conversation context
         self.llm_conversation = []
@@ -144,13 +149,19 @@ class LLMBrain:
         except Exception:
             return obs
 
-    def get_action(self, state, env):
+    def get_action(self, state, env, use_best=False):
         """
         Return the policy's action for the given state.
+        If use_best is True, uses the stored best policy.
         If we don't have a policy for the state, choose a random action.
         """
         disc_state = self.discretize_state(state)
-        policy_dict = self.policy_table.get_dict()
+        
+        if use_best:
+            policy_dict = self.best_policy_table.get_dict()
+        else:
+            policy_dict = self.policy_table.get_dict()
+            
         if disc_state in policy_dict:
             return policy_dict[disc_state]
         else:
@@ -429,16 +440,11 @@ def main():
         reward_snapshot = llm_brain.reward_table.to_json(total_reward, final_step=step_id)
         llm_brain.reward_history.append((total_reward, reward_snapshot))
 
-        # Update the policy using the LLM (the LLM now also sees the state-to-coordinate mapping and final step info)
+        # Update the policy using the LLM
         llm_brain.llm_update_policy()
 
-        # Save the new policy to a file
-        policy_file = os.path.join(episode_folder, "policy_table.txt")
-        with open(policy_file, 'w') as f:
-            f.write(llm_brain.policy_table.to_string())
-
         # Test the updated policy using the same coordinate logging and cycle detection
-        TEST_EPISODES = 1
+        TEST_EPISODES = min(3 + episode // 20, 5)
         test_rewards_this_update = []
         for test_i in range(TEST_EPISODES):
             state, _ = env.reset()
@@ -486,6 +492,22 @@ def main():
         # Store the average test reward for plotting
         avg_test_reward = np.mean(test_rewards_this_update)
         test_avg_rewards.append(avg_test_reward)
+        
+        print(f"Current Policy Avg Reward: {avg_test_reward:.2f} | Best So Far: {llm_brain.best_avg_test_reward:.2f}")
+
+        # Policy Update & Retention Logic
+        if avg_test_reward > llm_brain.best_avg_test_reward:
+            print(f"New Best Policy Found! Updating Best Policy (Reward: {avg_test_reward:.2f})")
+            llm_brain.best_avg_test_reward = avg_test_reward
+            llm_brain.best_policy_table = copy.deepcopy(llm_brain.policy_table)
+        else:
+            print(f"Current policy ({avg_test_reward:.2f}) is worse than best ({llm_brain.best_avg_test_reward:.2f}). Reverting to Best Policy.")
+            llm_brain.policy_table = copy.deepcopy(llm_brain.best_policy_table)
+        
+        # Save the policy table to file
+        policy_file = os.path.join(episode_folder, "policy_table.txt")
+        with open(policy_file, 'w') as f:
+            f.write(llm_brain.policy_table.to_string())
 
     env.close()
 

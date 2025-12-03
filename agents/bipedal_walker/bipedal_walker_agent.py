@@ -4,6 +4,7 @@ import os
 import time
 import matplotlib.pyplot as plt
 from google import genai  # Assumes you have the proper gemini client installed
+import copy
 
 import json
 import csv
@@ -105,6 +106,11 @@ class LLMBrain:
         # Memory for reward tables and policy
         self.reward_table = MemoryTable()
         self.policy_table = PolicyTable()
+        
+        # Store the BEST policy seen so far to prevent catastrophic forgetting
+        self.best_policy_table = PolicyTable()
+        self.best_avg_test_reward = -float('inf')
+        
         self.llm_conversation = []
 
         # Use only 4 dimensions from the BipedalWalker observation:
@@ -152,13 +158,19 @@ class LLMBrain:
             discrete_indices.append(idx)
         return tuple(discrete_indices)
 
-    def get_action(self, state, env):
+    def get_action(self, state, env, use_best=False):
         """
         Returns the policy's action for the given state (discretized).
+        If use_best is True, uses the stored best policy.
         If unknown, pick a random action from the discrete set.
         """
         disc_state = self.discretize_state(state)
-        policy_dict = self.policy_table.get_dict()
+        
+        if use_best:
+            policy_dict = self.best_policy_table.get_dict()
+        else:
+            policy_dict = self.policy_table.get_dict()
+            
         if disc_state in policy_dict:
             return policy_dict[disc_state]
         else:
@@ -360,7 +372,8 @@ def main():
             f.write(llm_brain.policy_table.to_string())
 
         # Testing phase with the new policy
-        TEST_EPISODES = 5
+        # Use dynamic number: start with 3, increase to 7 over time
+        TEST_EPISODES = min(3 + episode // 20, 7)
         test_rewards_this_update = []
         for test_i in range(TEST_EPISODES):
             state, info = env.reset()
@@ -393,6 +406,22 @@ def main():
 
         avg_test_reward = np.mean(test_rewards_this_update)
         test_avg_rewards.append(avg_test_reward)
+        
+        print(f"Current Policy Avg Reward: {avg_test_reward:.2f} | Best So Far: {llm_brain.best_avg_test_reward:.2f}")
+
+        # Policy Update & Retention Logic
+        if avg_test_reward > llm_brain.best_avg_test_reward:
+            print(f"New Best Policy Found! Updating Best Policy (Reward: {avg_test_reward:.2f})")
+            llm_brain.best_avg_test_reward = avg_test_reward
+            llm_brain.best_policy_table = copy.deepcopy(llm_brain.policy_table)
+        else:
+            print(f"Current policy ({avg_test_reward:.2f}) is worse than best ({llm_brain.best_avg_test_reward:.2f}). Reverting to Best Policy.")
+            llm_brain.policy_table = copy.deepcopy(llm_brain.best_policy_table)
+        
+        # Re-save the policy table to file (might be reverted)
+        policy_file = os.path.join(episode_folder, "policy_table.txt")
+        with open(policy_file, 'w') as f:
+            f.write(llm_brain.policy_table.to_string())
 
     env.close()
 

@@ -263,27 +263,45 @@ class LLMBrain:
 
     def llm_update_policy(self):
         """
-        Use the LLM to generate an updated policy based on the best reward histories.
+        Use the LLM to generate an updated policy based on the best and worst reward histories.
         
         The process involves:
-          1. Selecting the best 5 episodes (by total reward) from the reward history.
+          1. Selecting the best 4 episodes and worst 1 episode from reward history.
           2. Creating a prompt that includes these reward tables (in JSON format)
              and the current policy table.
           3. Sending this prompt to the LLM and parsing its output.
-          4. Updating the local policy table with the newly generated policy.
+          4. Validating and updating the local policy table with the newly generated policy.
         """
         # Reset conversation history before constructing a new prompt.
         self.reset_llm_conversation()
 
         # -----------------------------
-        # Select the best 5 episodes from reward_history
+        # Select the best 4 and worst 1 episodes from reward_history
         # -----------------------------
         if self.reward_history:
             # Sort reward history by total reward in descending order.
             sorted_reward_history = sorted(self.reward_history, key=lambda x: x[0], reverse=True)
-            best_reward_history = sorted_reward_history[:5]
-            # Convert each reward table JSON string back into a dict and then dump as a JSON array.
-            reward_history_json = json.dumps([json.loads(entry[1]) for entry in best_reward_history], indent=2)
+            best_reward_history = sorted_reward_history[:4]
+            
+            # Also include one bad episode to teach the LLM what NOT to do
+            worst_reward_history = []
+            if len(sorted_reward_history) > 5:
+                worst_episode = sorted_reward_history[-1]
+                worst_reward_history = [worst_episode]
+            
+            # Combine best and worst episodes
+            combined_history = []
+            for entry in best_reward_history:
+                episode_data = json.loads(entry[1])
+                episode_data["label"] = "GOOD"
+                combined_history.append(episode_data)
+            
+            for entry in worst_reward_history:
+                episode_data = json.loads(entry[1])
+                episode_data["label"] = "BAD - AVOID THESE PATTERNS"
+                combined_history.append(episode_data)
+            
+            reward_history_json = json.dumps(combined_history, indent=2)
         else:
             reward_history_json = "[]"
         
@@ -316,7 +334,7 @@ class LLMBrain:
 
         user_prompt = f"""
         ---------------------
-        Reward Table History (Best 5 Episodes) in JSON:
+        Reward Table History (4 GOOD + 1 BAD episode) in JSON:
         {reward_history_json}
 
         ---------------------
@@ -324,10 +342,11 @@ class LLMBrain:
         {old_policy_str}
 
         INSTRUCTIONS:
-        1. Analyze the Reward History to identify which actions led to high rewards (survival).
-        2. Generate a NEW Policy Table. 
-        3. Use the Physics Hints to fill in gaps or correct bad entries.
-        4. Output ONLY the policy rows - NO explanations, NO markdown code blocks, NO headers, NO extra text.
+        1. Analyze the GOOD episodes to identify which actions led to high rewards (survival).
+        2. Analyze the BAD episode (if present) to identify patterns to AVOID.
+        3. Generate a NEW Policy Table that maximizes good patterns and avoids bad patterns.
+        4. Use the Physics Hints to fill in gaps or correct bad entries.
+        5. Output ONLY the policy rows - NO explanations, NO markdown code blocks, NO headers, NO extra text.
         
         FORMAT (output EXACTLY this format for each policy entry):
         pos_bin | vel_bin | angle_bin | angvel_bin | action
@@ -386,6 +405,13 @@ class LLMBrain:
                 except ValueError:
                     print(f"Failed to parse line: {line}")
         print(f"Successfully parsed {parsed_count} policy entries from LLM response.")
+        
+        # -----------------------------
+        # Validate the candidate policy
+        # -----------------------------
+        if parsed_count < 10:
+            print(f"WARNING: Policy only has {parsed_count} entries (expected ~50+). Keeping old policy.")
+            return  # Don't update - likely a parsing failure
         
         # Update the current policy table to this new candidate
         self.policy_table.table = candidate_policy_table
@@ -483,7 +509,8 @@ def main():
         # 2. TESTING PHASE
         # ----------------
         # Test the new policy over a few episodes.
-        TEST_EPISODES = 5
+        # Use dynamic number: start with 3, increase to 10 over time
+        TEST_EPISODES = min(3 + episode // 20, 10)
         test_rewards_this_update = []
         for test_i in range(TEST_EPISODES):
             state, _ = env.reset()
