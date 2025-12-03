@@ -11,6 +11,9 @@ from google import genai
 from openai import OpenAI
 import json  # for JSON parsing/formatting
 import csv
+from dotenv import load_dotenv
+
+load_dotenv()
 
 API_KEY = os.getenv('apiKey')
 BASE_URL = os.getenv('baseURL')
@@ -165,7 +168,7 @@ class LLMBrain:
         Send the conversation to the LLM and get the response text.
         """
         prompt = " ".join(msg.get("content", "") for msg in self.llm_conversation)
-        model = "gemini-2.0-flash"
+        model = "gemini-2.5-flash"
         
         for attempt in range(5):
             try:
@@ -346,7 +349,7 @@ def smooth_data(data, window=5):
 # --------------------------------
 def main():
     # Create the FrozenLake environment.
-    env = gym.make('FrozenLake-v1', map_name="8x8", is_slippery=False, render_mode="human")
+    env = gym.make('FrozenLake-v1', map_name="4x4", is_slippery=False, render_mode="human")
     llm_brain = LLMBrain(env_action_space_n=env.action_space.n)
 
     # Build a complete state-to-coordinate mapping for the grid and store it in llm_brain.
@@ -357,7 +360,7 @@ def main():
         state_coords_mapping[s] = (s // ncol, s % ncol)
     llm_brain.state_coords_mapping = state_coords_mapping
 
-    folder = './frozenlake_llm_logs/'
+    folder = './logs/frozen_lake/'
     os.makedirs(folder, exist_ok=True)
 
     NUM_EPISODES = 100
@@ -489,7 +492,7 @@ def main():
     # -------------------
     #  Save Plot Values and Figures
     # -------------------
-    csv_filename = "frozenlake_plot_values.csv"
+    csv_filename = os.path.join(folder, "frozenlake_plot_values.csv")
     with open(csv_filename, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["Episode", "Training Raw Reward", "Avg Test Raw Reward"])
@@ -510,7 +513,7 @@ def main():
     plt.title('Training Episode Raw Rewards for FrozenLake')
     plt.legend()
     plt.tight_layout()
-    training_plot_filename = "frozenlake_training_rewards_smoothed.png"
+    training_plot_filename = os.path.join(folder, "frozenlake_training_rewards_smoothed.png")
     plt.savefig(training_plot_filename)
     print(f"Saved training rewards plot to {training_plot_filename}")
     plt.show()
@@ -527,7 +530,7 @@ def main():
     plt.title('Average Test Raw Rewards for FrozenLake')
     plt.legend()
     plt.tight_layout()
-    test_plot_filename = "frozenlake_avg_test_rewards_smoothed.png"
+    test_plot_filename = os.path.join(folder, "frozenlake_avg_test_rewards_smoothed.png")
     plt.savefig(test_plot_filename)
     print(f"Saved average test rewards plot to {test_plot_filename}")
     plt.show()

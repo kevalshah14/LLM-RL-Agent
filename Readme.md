@@ -5,25 +5,20 @@ This project implements reinforcement learning agents for various environments u
 ## Project Structure
 
 ```
-.env
-.gitignore
-BipeadalWalker/
-    BipedalWalker.py
-Cartpole/
-    cartpole_v2.py
-    cartpole_v3.py
-    CartPole_Without_LLM.py
-    CartPole.py
-    Improvements.md
-FrozenLake/
-    frozenlake_avg_test_rewards_smoothed1.png
-    frozenlake_plot_values.csv
-    frozenlake_training_rewards_smoothed1.png
-    FrozenLake.py
-MountainCar/
-    MountainCar_v2.py
-    MountainCar.py
-poetry.lock
+agents/
+    cartpole/
+        cartpole_agent.py
+    frozen_lake/
+        frozen_lake_agent.py
+    bipedal_walker/
+        bipedal_walker_agent.py
+    hopper/
+        hopper_agent.py
+logs/
+    cartpole/
+    frozen_lake/
+    bipedal_walker/
+    hopper/
 pyproject.toml
 README.md
 ```
@@ -46,9 +41,11 @@ README.md
     cd llm-rl-agent
     ```
 
-2. Install dependencies using Poetry:
+2. Install dependencies (using `uv` or `pip`):
     ```sh
-    poetry install
+    uv sync
+    # or
+    pip install .
     ```
 
 ## Usage
@@ -57,47 +54,37 @@ README.md
 
 To run the CartPole agent:
 ```sh
-python Cartpole/CartPole.py
-```
-
-### MountainCar
-
-To run the MountainCar agent:
-```sh
-python MountainCar/MountainCar.py
+python agents/cartpole/cartpole_agent.py
 ```
 
 ### FrozenLake
 
 To run the FrozenLake agent:
 ```sh
-python FrozenLake/FrozenLake.py
+python agents/frozen_lake/frozen_lake_agent.py
 ```
 
 ### BipedalWalker
 
 To run the BipedalWalker agent:
 ```sh
-python BipeadalWalker/BipedalWalker.py
+python agents/bipedal_walker/bipedal_walker_agent.py
+```
+
+### Hopper
+
+To run the Hopper agent:
+```sh
+python agents/hopper/hopper_agent.py
 ```
 
 ## Project Details
 
-### CartPole
+### Logging
 
-The CartPole agent logs its Q-table and testing results in the `cartpole_logs` directory. Each episode has its own subdirectory containing the Q-table and testing results.
+All agents log their results in the `logs/` directory. Each agent has its own subdirectory (e.g., `logs/cartpole/`). Within each agent's log directory, episodes are stored in numbered subfolders (e.g., `episode_1/`), containing training logs, policy tables, and testing results.
 
-### MountainCar
-
-The MountainCar agent logs its results in the `mountain_car_logs` directory.
-
-### FrozenLake
-
-The FrozenLake agent logs its results in the `frozenlake_logs` directory.
-
-### BipedalWalker
-
-The BipedalWalker agent logs its results in the `bipedalwalker_logs` directory.
+Plots and CSV summaries are also saved in the respective agent's log directory.
 
 ## License
 

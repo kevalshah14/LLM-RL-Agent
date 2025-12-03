@@ -2,99 +2,58 @@ import gymnasium as gym
 import numpy as np
 import os
 import time
-import matplotlib.pyplot as plt  # for plotting
-from google import genai
+import matplotlib.pyplot as plt
+from google import genai  # Assumes you have the proper gemini client installed
 
-# -------------
-# LLM IMPORTS
-# -------------
-from openai import OpenAI
-import json  # for JSON parsing/formatting
+import json
 import csv
+import itertools
+import random
+from dotenv import load_dotenv
 
-API_KEY = os.getenv('apiKey')
-BASE_URL = os.getenv('baseURL')
-GEMINI_API_KEY = os.getenv('geminiApiKey')
+load_dotenv()
 
+# --------------------------------------------------
+# Custom Reward Wrapper to Remove the -100 Penalty
+# --------------------------------------------------
+class RemovePenaltyWrapper(gym.RewardWrapper):
+    def __init__(self, env):
+        super().__init__(env)
+    def reward(self, reward):
+        # If the reward equals -100 (penalty), replace it with 0.
+        # You can adjust the replacement value if desired.
+        if reward == -100:
+            return 0
+        return reward
 
-# -----------------------------------------------------------
-#  Reward Shaping Wrapper: Rewards based on decrease in distance to the goal.
-# -----------------------------------------------------------
-class RewardShapingDistanceWrapper(gym.Wrapper):
-    def __init__(self, env, progress_scale=100, goal_position=0.5):
-        """
-        Wraps an environment to add a reward based on the change in distance to the goal.
-        
-        Args:
-            env: The original gym environment.
-            progress_scale: A scaling factor for the distance progress reward.
-            goal_position: The x-coordinate position that defines the goal.
-                           (For MountainCar-v0, the goal is typically at 0.5)
-        """
-        super(RewardShapingDistanceWrapper, self).__init__(env)
-        self.progress_scale = progress_scale
-        self.goal_position = goal_position
-        self.last_distance = None
-
-    def reset(self, **kwargs):
-        self.last_distance = None
-        state, info = self.env.reset(**kwargs)
-        position, _ = state
-        # Compute the initial distance from the goal.
-        self.last_distance = self.goal_position - position
-        return state, info
-
-    def step(self, action):
-        state, reward, done, truncated, info = self.env.step(action)
-        position, _ = state
-        # Current distance from the goal. (If the car overshoots, this may become negative.)
-        current_distance = self.goal_position - position
-        if self.last_distance is None:
-            self.last_distance = current_distance
-
-        # Compute the progress as the decrease in distance to the goal.
-        # A positive value means the car is getting closer.
-        progress = (self.last_distance - current_distance) * self.progress_scale
-        self.last_distance = current_distance
-
-        # Augment the default reward (-1 per step) with the progress-based bonus.
-        shaped_reward = reward + progress
-        return state, shaped_reward, done, truncated, info
-
-
-# --------------------------------
-#  MemoryTable for Rewards
-# --------------------------------
+# --------------------------------------------------
+# MemoryTable for Rewards
+# --------------------------------------------------
 class MemoryTable:
     """
-    A simple table storing (state, action, reward). This will be passed
-    to the LLM for updating the policy.
+    A simple table storing (state, action, reward).
+    We'll pass these to the LLM so it can figure out
+    how to update the policy.
     """
     def __init__(self):
         self.table = []
 
     def to_string(self):
-        """
-        Convert to lines: "state (position, velocity) | action | reward"
-        """
-        header = "state (position, velocity) | action | reward\n"
-        header += "-----------------------------------------\n"
+        header = "state (angle_bin, angular_vel_bin, hor_speed_bin, ver_speed_bin) | action (vector) | reward\n"
+        header += "--------------------------------------------------------------------------\n"
         lines = []
         for (s, a, r) in self.table:
-            lines.append(f"{s} | {a} | {r}")
+            # Format the action vector nicely
+            action_str = ", ".join([f"{x:.2f}" for x in a])
+            lines.append(f"{s} | [{action_str}] | {r}")
         return header + "\n".join(lines)
 
     def to_json(self, total_reward=None):
-        """
-        Convert the reward table to a JSON-formatted string.
-        Each entry is a dict with keys: state, action, reward.
-        Optionally include the total_reward.
-        """
         rewards_list = []
         for (s, a, r) in self.table:
             rewards_list.append({
                 "state": [int(x) for x in s],
-                "action": int(a),
+                "action": [float(x) for x in a],
                 "reward": float(r) if isinstance(r, np.floating) else int(r) if isinstance(r, np.integer) else r
             })
         data = {"rewards": rewards_list}
@@ -103,25 +62,26 @@ class MemoryTable:
         return json.dumps(data, indent=2)
 
 
-# --------------------------------
-#  PolicyTable
-# --------------------------------
+# --------------------------------------------------
+# PolicyTable
+# --------------------------------------------------
 class PolicyTable:
     """
-    Stores a mapping from discrete states -> best action.
-    The expected format from the LLM is:
-       pos_bin | vel_bin | action
+    Stores a mapping from discretized states to the best continuous action.
+    The expected policy table lines are:
+      angle_bin | angular_vel_bin | hor_speed_bin | ver_speed_bin | action0, action1, action2, action3
     """
     def __init__(self):
-        self.table = []  # list of (state_tuple, action)
+        self.table = []  # list of (state_tuple, action_vector)
 
     def to_string(self):
-        header = "pos_bin | vel_bin | action\n"
-        header += "--------------------------\n"
+        header = "angle_bin | angular_vel_bin | hor_speed_bin | ver_speed_bin | action (a0, a1, a2, a3)\n"
+        header += "---------------------------------------------------------------------\n"
         lines = []
         for (s, a) in self.table:
-            (p, v) = s
-            lines.append(f"{p} | {v} | {a}")
+            action_str = ", ".join([f"{x:.2f}" for x in a])
+            (ang, ang_vel, hor_speed, ver_speed) = s
+            lines.append(f"{ang} | {ang_vel} | {hor_speed} | {ver_speed} | {action_str}")
         return header + "\n".join(lines)
 
     def get_dict(self):
@@ -131,32 +91,41 @@ class PolicyTable:
         return d
 
 
-# --------------------------------
-#  LLMBrain
-# --------------------------------
+# --------------------------------------------------
+# LLMBrain
+# --------------------------------------------------
 class LLMBrain:
     def __init__(self,
-                 num_buckets=(20, 20),
-                 env_action_space_n=3):
-        # Uncomment and use your actual client if needed:
-        # self.client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
-        self.client = genai.Client(api_key=GEMINI_API_KEY)
+                 num_buckets=(10, 10, 10, 10),
+                 state_bounds=None,
+                 discrete_actions=None):
+        # Initialize the LLM client (using the Gemini API in this example)
+        self.client = genai.Client(api_key=os.getenv('geminiApiKey'))
 
+        # Memory for reward tables and policy
         self.reward_table = MemoryTable()
         self.policy_table = PolicyTable()
         self.llm_conversation = []
 
-        # Discretization settings for MountainCar:
-        # State dimensions: position and velocity.
+        # Use only 4 dimensions from the BipedalWalker observation:
+        # For example, we use: hull angle, hull angular velocity,
+        # horizontal speed, and vertical speed.
         self.num_buckets = num_buckets
-        self.state_bounds = [
-            (-1.2, 0.6),    # position
-            (-0.07, 0.07)   # velocity
-        ]
-        self.action_space_n = env_action_space_n
+        if state_bounds is None:
+            # These bounds are approximate – adjust as needed!
+            self.state_bounds = [(-1.0, 1.0), (-10.0, 10.0), (-3.0, 3.0), (-3.0, 3.0)]
+        else:
+            self.state_bounds = state_bounds
 
-        # History of reward tables as tuples: (total_reward, reward_table_json_string)
-        self.reward_history = []
+        # Create a discrete set of actions if not provided.
+        # Here we use the Cartesian product of [-1.0, 0.0, 1.0] for each of the 4 action dimensions.
+        if discrete_actions is None:
+            self.discrete_actions = list(itertools.product([-1.0, 0.0, 1.0], repeat=4))
+        else:
+            self.discrete_actions = discrete_actions
+
+        self.action_dim = 4
+        self.reward_history = []  # List of tuples: (total_reward, reward_table_json_string)
 
     def reset_llm_conversation(self):
         self.llm_conversation = []
@@ -166,15 +135,16 @@ class LLMBrain:
 
     def discretize_state(self, obs):
         """
-        Discretize the continuous MountainCar state into a 2D discrete state.
+        Convert a continuous state (using the first 4 dimensions) to a discrete state.
         """
+        # Use the first 4 features (assumed to be: hull angle, angular velocity, horizontal speed, vertical speed)
+        relevant_obs = obs[:4]
         ratios = []
-        for i, val in enumerate(obs):
+        for i, val in enumerate(relevant_obs):
             low, high = self.state_bounds[i]
             clipped = max(min(val, high), low)
             ratio = (clipped - low) / (high - low)
             ratios.append(ratio)
-
         discrete_indices = []
         for i, ratio in enumerate(ratios):
             nb = self.num_buckets[i]
@@ -184,27 +154,29 @@ class LLMBrain:
 
     def get_action(self, state, env):
         """
-        Return the policy's action for the given state (discretized).
-        If not found, return a random action.
+        Returns the policy's action for the given state (discretized).
+        If unknown, pick a random action from the discrete set.
         """
         disc_state = self.discretize_state(state)
         policy_dict = self.policy_table.get_dict()
         if disc_state in policy_dict:
             return policy_dict[disc_state]
         else:
-            return env.action_space.sample()
+            return random.choice(self.discrete_actions)
 
     def add_to_reward_table(self, state, action, reward):
+        """
+        Store the immediate reward for (state, action).
+        """
         disc_state = self.discretize_state(state)
         self.reward_table.table.append((disc_state, action, reward))
 
     def query_llm(self):
         """
-        Send the conversation to the LLM and get the response text.
+        Sends the conversation to the LLM and returns the response text.
         """
         prompt = " ".join(msg.get("content", "") for msg in self.llm_conversation)
-        model = "gemini-2.0-flash"
-
+        model = "gemini-2.5-flash"
         for attempt in range(5):
             try:
                 print(f"Attempting with model: {model}")
@@ -220,7 +192,7 @@ class LLMBrain:
             except Exception as e:
                 print(f"Error with model {model}: {e}")
                 if attempt < 4:
-                    print("Retrying... Waiting for 60 seconds before retrying...")
+                    print("Retrying in 60 seconds...")
                     time.sleep(60)
                 else:
                     print(f"Failed with model: {model} after 5 attempts")
@@ -229,11 +201,12 @@ class LLMBrain:
 
     def llm_update_policy(self):
         """
-        Provide the reward history (best 5 episodes) and current policy to the LLM,
-        and update the policy based on the LLM's response.
+        Provide the reward table history and existing policy to the LLM,
+        then parse its output to update the policy.
         """
         self.reset_llm_conversation()
 
+        # Select the best 5 reward histories (if available)
         if self.reward_history:
             sorted_reward_history = sorted(self.reward_history, key=lambda x: x[0], reverse=True)
             best_reward_history = sorted_reward_history[:5]
@@ -242,13 +215,13 @@ class LLMBrain:
             reward_history_json = "[]"
         
         system_prompt = f"""
-You are an AI that decides a simple tabular policy for the MountainCar environment.
-The environment has 2 discrete dimensions (position, velocity) and 3 possible actions (0: push left, 1: no push, 2: push right).
-Reward tables are provided in JSON format.
+You are an AI that decides a simple tabular policy for the BipedalWalker-v3 environment.
+The state is discretized into 4 dimensions (angle_bin, angular_vel_bin, hor_speed_bin, ver_speed_bin).
+The action is a 4-dimensional vector, where each element is one of -1.0, 0.0, or 1.0.
+The reward tables are provided in JSON format.
         """
 
         old_policy_str = self.policy_table.to_string()
-
         user_prompt = f"""
 ---------------------
 Reward Table History (best 5 episodes) in JSON format:
@@ -259,7 +232,7 @@ Old Policy Table:
 {old_policy_str}
 
 Please output ONLY the new policy in lines of:
-pos_bin | vel_bin | action
+angle_bin | angular_vel_bin | hor_speed_bin | ver_speed_bin | action0, action1, action2, action3
         """
 
         self.add_llm_conversation(system_prompt, "system")
@@ -270,12 +243,14 @@ pos_bin | vel_bin | action
         print("LLM Response:")
         print(new_policy_str)
 
+        # Attempt JSON parse (if applicable)
         try:
             policy_json = json.loads(new_policy_str)
             print("Successfully parsed JSON from LLM response.")
         except json.JSONDecodeError:
             print("LLM response is not valid JSON. Proceeding with text line parsing.")
 
+        # Clear the old policy table and parse the new policy
         self.policy_table.table = []
         parsed_count = 0
 
@@ -284,56 +259,67 @@ pos_bin | vel_bin | action
             if not line:
                 continue
             parts = line.split("|")
-            if len(parts) == 3:
+            if len(parts) == 5:
                 try:
-                    pos_bin = int(parts[0].strip())
-                    vel_bin = int(parts[1].strip())
-                    act = int(parts[2].strip())
-                    state = (pos_bin, vel_bin)
-                    self.policy_table.table.append((state, act))
+                    ang_bin = int(parts[0].strip())
+                    ang_vel_bin = int(parts[1].strip())
+                    hor_speed_bin = int(parts[2].strip())
+                    ver_speed_bin = int(parts[3].strip())
+                    action_str = parts[4].strip()
+                    # Remove surrounding brackets if present
+                    action_str = action_str.strip("[]")
+                    action_parts = action_str.split(",")
+                    if len(action_parts) != 4:
+                        print(f"Failed to parse action vector in line: {line}")
+                        continue
+                    act = tuple(float(x.strip()) for x in action_parts)
+                    state_tuple = (ang_bin, ang_vel_bin, hor_speed_bin, ver_speed_bin)
+                    self.policy_table.table.append((state_tuple, act))
                     parsed_count += 1
                 except ValueError:
                     print(f"Failed to parse line: {line}")
         print(f"Successfully parsed {parsed_count} policy entries from LLM response.")
 
 
-# --------------------------------
-#  Helper function for smoothing data
-# --------------------------------
+# --------------------------------------------------
+# Helper function for smoothing data
+# --------------------------------------------------
 def smooth_data(data, window=5):
     return np.convolve(data, np.ones(window) / window, mode='valid')
 
 
-# --------------------------------
-#  MAIN LOOP
-# --------------------------------
+# --------------------------------------------------
+# MAIN LOOP
+# --------------------------------------------------
 def main():
-    # Create the MountainCar environment and wrap it with the reward shaping wrapper.
-    base_env = gym.make('MountainCar-v0', render_mode=None)
-    env = RewardShapingDistanceWrapper(base_env, progress_scale=100, goal_position=0.5)
+    # Create the BipedalWalker-v3 environment
+    env = gym.make('BipedalWalker-v3', hardcore=False, render_mode='human')
+    # Wrap the environment to remove the -100 penalty from rewards
+    env = RemovePenaltyWrapper(env)
     
-    llm_brain = LLMBrain(num_buckets=(20, 20),
-                         env_action_space_n=env.action_space.n)
-
-    folder = './mountaincar_llm_reward_shaping_distance_logs/'
+    # Instantiate LLMBrain with appropriate discretization for BipedalWalker.
+    llm_brain = LLMBrain(num_buckets=(10, 10, 10, 10))
+    
+    # Folder for logs
+    folder = './logs/bipedal_walker/'
     os.makedirs(folder, exist_ok=True)
 
     NUM_EPISODES = 100
-
+    
     # Lists for plotting rewards
     training_rewards = []
-    test_avg_rewards = []  # Average reward over test episodes after each policy update
-
+    test_avg_rewards = []
+    
     for episode in range(NUM_EPISODES):
-        # Clear the reward table for the new episode
+        # Reset the reward table for this episode
         llm_brain.reward_table.table = []
 
-        state, _ = env.reset()
+        state, info = env.reset()
         done = False
         step_id = 0
         total_reward = 0
 
-        # Logging for training episode
+        # Create folder and file for logging this episode
         episode_folder = os.path.join(folder, f"episode_{episode+1}")
         os.makedirs(episode_folder, exist_ok=True)
         train_file = os.path.join(episode_folder, "training_episode.txt")
@@ -341,43 +327,43 @@ def main():
         with open(train_file, 'w') as f:
             f.write(f"Episode {episode+1}\n")
             f.write("Step | State (continuous) | Discretized State | Action | Reward\n")
-
+            
             while not done:
                 step_id += 1
                 action = llm_brain.get_action(state, env)
-                next_state, reward, done, truncated, info = env.step(action)
+                next_state, reward, terminated, truncated, info = env.step(action)
+                done = terminated or truncated
 
                 total_reward += reward
                 llm_brain.add_to_reward_table(state, action, reward)
 
                 disc_st = llm_brain.discretize_state(state)
-                f.write(f"{step_id} | {state} | {disc_st} | {action} | {reward}\n")
+                f.write(f"{step_id} | {state[:4]} | {disc_st} | {action} | {reward}\n")
 
                 state = next_state
-                if done or step_id >= 200:
+                if done or step_id >= 1600:
                     print(f"[Train] Episode {episode+1} ended. Total reward: {total_reward}")
                     break
             f.write(f"Total Reward: {total_reward}\n")
         
         training_rewards.append(total_reward)
-        
-        # Save the current episode's reward table and total reward as JSON.
+        # Save the current reward table with its total reward (in JSON) for the LLM
         reward_snapshot = llm_brain.reward_table.to_json(total_reward)
         llm_brain.reward_history.append((total_reward, reward_snapshot))
 
-        # Update the policy using the LLM.
+        # Ask the LLM for an updated policy
         llm_brain.llm_update_policy()
 
-        # Save the new policy to a file.
+        # Save the updated policy table to file
         policy_file = os.path.join(episode_folder, "policy_table.txt")
         with open(policy_file, 'w') as f:
             f.write(llm_brain.policy_table.to_string())
 
-        # Test the updated policy.
+        # Testing phase with the new policy
         TEST_EPISODES = 5
         test_rewards_this_update = []
         for test_i in range(TEST_EPISODES):
-            state, _ = env.reset()
+            state, info = env.reset()
             done = False
             step_id = 0
             total_test_reward = 0
@@ -390,15 +376,16 @@ def main():
                 while not done:
                     step_id += 1
                     action = llm_brain.get_action(state, env)
-                    next_state, reward, done, truncated, info = env.step(action)
+                    next_state, reward, terminated, truncated, info = env.step(action)
+                    done = terminated or truncated
 
                     total_test_reward += reward
                     disc_st = llm_brain.discretize_state(state)
-                    f.write(f"{step_id} | {state} | {disc_st} | {action} | {reward}\n")
+                    f.write(f"{step_id} | {state[:4]} | {disc_st} | {action} | {reward}\n")
 
                     state = next_state
-                    if done or step_id >= 200:
-                        print(f"[Test] Episode {episode+1}, Test {test_i+1} ended. Total reward: {total_test_reward}")
+                    if done or step_id >= 1600:
+                        print(f"[Test] Episode {episode+1}, Test {test_i+1} ended. Reward: {total_test_reward}")
                         break
                 f.write(f"Total Reward: {total_test_reward}\n")
 
@@ -409,10 +396,8 @@ def main():
 
     env.close()
 
-    # -------------------
-    #  Save Plot Values and Figures
-    # -------------------
-    csv_filename = "mountaincar_reward_shaping_distance_plot_values.csv"
+    # Save rewards to CSV
+    csv_filename = os.path.join(folder, "plot_values.csv")
     with open(csv_filename, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["Episode", "Training Reward", "Avg Test Reward"])
@@ -420,9 +405,8 @@ def main():
             writer.writerow([i+1, training_rewards[i], test_avg_rewards[i]])
     print(f"Saved plot values to {csv_filename}")
 
+    # Plot training rewards with smoothing
     window_size = 5
-
-    # Plot training rewards
     smoothed_training = smooth_data(training_rewards, window=window_size)
     training_x = np.arange(window_size - 1, len(training_rewards))
 
@@ -431,15 +415,15 @@ def main():
     plt.plot(training_x, smoothed_training, label='Smoothed Trend', color='blue', linewidth=2)
     plt.xlabel('Episode')
     plt.ylabel('Total Reward')
-    plt.title('Training Episode Rewards (MountainCar with Distance-Based Reward Shaping)')
+    plt.title('Training Episode Rewards (BipedalWalker)')
     plt.legend()
     plt.tight_layout()
-    training_plot_filename = "mountaincar_training_rewards_distance_shaped.png"
+    training_plot_filename = os.path.join(folder, "training_rewards_smoothed.png")
     plt.savefig(training_plot_filename)
     print(f"Saved training rewards plot to {training_plot_filename}")
     plt.show()
 
-    # Plot average test rewards
+    # Plot average test rewards with smoothing
     smoothed_test = smooth_data(test_avg_rewards, window=window_size)
     test_x = np.arange(window_size - 1, len(test_avg_rewards))
 
@@ -448,10 +432,10 @@ def main():
     plt.plot(test_x, smoothed_test, label='Smoothed Trend', color='red', linewidth=2)
     plt.xlabel('Episode')
     plt.ylabel('Average Reward (over 5 tests)')
-    plt.title('Average Test Rewards (MountainCar with Distance-Based Reward Shaping)')
+    plt.title('Average Test Rewards (BipedalWalker)')
     plt.legend()
     plt.tight_layout()
-    test_plot_filename = "mountaincar_avg_test_rewards_distance_shaped.png"
+    test_plot_filename = os.path.join(folder, "avg_test_rewards_smoothed.png")
     plt.savefig(test_plot_filename)
     print(f"Saved average test rewards plot to {test_plot_filename}")
     plt.show()

@@ -1,2 +1,15 @@
+# Environment variables
 *.env
-*_logs
+
+# Logs
+logs/
+*_logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# System
+.DS_Store
