@@ -1,0 +1,364 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,
+    urlcolor=cyan,
+}
+
+\begin{document}
+
+\title{LLM-RL-Agent: Leveraging Large Language Models as Policy Generators for Reinforcement Learning}
+
+\author{
+\IEEEauthorblockN{Keval Rajesh Shah}
+\IEEEauthorblockA{
+\textit{School of Computing and Augmented Intelligence}\\
+\textit{Arizona State University}\\
+Tempe, AZ, USA\\
+kshah57@asu.edu
+}
+}
+
+\maketitle
+
+\begin{abstract}
+This paper presents LLM-RL-Agent, a novel framework that leverages Large Language Models (LLMs) as policy generators for reinforcement learning (RL) tasks. Unlike traditional RL approaches that rely on gradient-based optimization or value function approximation, our approach utilizes the reasoning capabilities of LLMs to directly generate and iteratively refine tabular policies. We implement this framework across four OpenAI Gymnasium environments: CartPole-v1, FrozenLake-v1, Hopper-v5, and BipedalWalker-v3, demonstrating varying degrees of success. Our results show that LLM-guided policy generation achieves strong performance on discrete control tasks (CartPole and FrozenLake), while continuous control tasks (Hopper and BipedalWalker) present significant challenges. We introduce a best-policy retention mechanism to prevent catastrophic forgetting and provide detailed analysis of the approach's strengths and limitations. The complete implementation is available at \url{https://github.com/kevalshah14/LLM-RL-Agent.git}.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Large Language Models, Reinforcement Learning, Policy Generation, OpenAI Gymnasium, Tabular Methods
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+Reinforcement learning (RL) has achieved remarkable success in domains ranging from game playing to robotic control. Traditional RL algorithms, such as Q-learning, policy gradients, and actor-critic methods, learn optimal behaviors through extensive environment interactions and gradient-based optimization. However, these approaches often require millions of environment steps and careful hyperparameter tuning.
+
+Large Language Models (LLMs) have recently emerged as powerful tools capable of reasoning, planning, and generating structured outputs. This raises an intriguing question: \textit{Can LLMs serve as direct policy generators for RL tasks, leveraging their vast knowledge of physics, control, and optimization to accelerate learning?}
+
+In this work, we present LLM-RL-Agent, a framework that uses LLMs—specifically Google's Gemini models—to iteratively generate and refine tabular policies for control tasks. Our approach treats the LLM as an ``expert consultant'' that analyzes reward histories from past episodes and proposes improved state-action mappings.
+
+Our main contributions are:
+\begin{itemize}
+    \item A novel framework for LLM-guided policy generation in RL environments
+    \item State discretization schemes for continuous observation and action spaces
+    \item A best-policy retention mechanism to prevent catastrophic forgetting
+    \item Comprehensive evaluation across four Gymnasium environments with varying complexity
+    \item Analysis of when LLM-based approaches succeed and where they struggle
+\end{itemize}
+
+\section{Related Work}
+
+\subsection{Traditional Reinforcement Learning}
+
+Classical RL algorithms can be broadly categorized into value-based methods (Q-learning, DQN), policy-based methods (REINFORCE, PPO), and actor-critic methods (A2C, SAC). These approaches typically require extensive environment interactions and learn through trial-and-error with gradient descent optimization.
+
+\subsection{LLMs for Decision Making}
+
+Recent work has explored using LLMs for various decision-making tasks. Chain-of-thought prompting enables complex reasoning, while approaches like ReAct combine reasoning with action generation. Several works have investigated LLMs for robotic planning and control, though typically in higher-level task planning rather than low-level policy generation.
+
+\subsection{Combining LLMs and RL}
+
+Emerging research explores synergies between LLMs and RL, including using LLMs for reward shaping, generating environment descriptions, or providing demonstrations. Our work differs by using LLMs as the primary policy generator, directly mapping states to actions based on analyzed experience.
+
+\section{Methodology}
+
+\subsection{Problem Formulation}
+
+We consider the standard RL setting with a Markov Decision Process (MDP) defined by $(S, A, P, R, \gamma)$, where $S$ is the state space, $A$ is the action space, $P$ is the transition function, $R$ is the reward function, and $\gamma$ is the discount factor.
+
+Rather than learning a policy $\pi: S \rightarrow A$ through gradient-based optimization, we use an LLM to directly generate and refine a tabular policy mapping discretized states to actions.
+
+\subsection{System Architecture}
+
+Our LLM-RL-Agent framework consists of three main components:
+
+\subsubsection{Memory Table}
+Stores experience tuples $(s, a, r)$ collected during environment interactions. These are formatted as JSON and provided to the LLM as learning context.
+
+\subsubsection{Policy Table}
+A tabular mapping from discretized states to actions. The LLM generates new entries based on analyzed experience. For discrete action spaces, actions are stored directly; for continuous spaces, we discretize actions into bins.
+
+\subsubsection{LLM Brain}
+The core reasoning component that:
+\begin{itemize}
+    \item Maintains conversation history with the LLM
+    \item Constructs prompts with physics hints and experience data
+    \item Parses LLM responses into policy table entries
+    \item Manages best-policy retention for stability
+\end{itemize}
+
+\subsection{State and Action Discretization}
+
+For environments with continuous observations, we discretize states into bins:
+
+\begin{equation}
+s_{discrete}^{(i)} = \left\lfloor \frac{\text{clip}(s^{(i)}, l_i, h_i) - l_i}{h_i - l_i} \cdot (n_i - 1) + 0.5 \right\rfloor
+\end{equation}
+
+where $s^{(i)}$ is the $i$-th state dimension, $[l_i, h_i]$ are the bounds, and $n_i$ is the number of buckets.
+
+For environments with continuous actions, we similarly discretize and later map discrete actions back to continuous values.
+
+\subsection{LLM Prompt Design}
+
+Our prompts contain:
+\begin{enumerate}
+    \item \textbf{System Context}: Physics descriptions, state/action semantics, and optimization objectives
+    \item \textbf{Experience Data}: Best and worst episode histories in JSON format
+    \item \textbf{Current Policy}: The existing policy table for iterative improvement
+    \item \textbf{Instructions}: Specific formatting requirements for output parsing
+\end{enumerate}
+
+\subsection{Best-Policy Retention}
+
+To prevent catastrophic forgetting where the LLM proposes a worse policy, we maintain:
+\begin{itemize}
+    \item A best policy table with the highest average test reward observed
+    \item Automatic reversion to the best policy if the new policy underperforms
+    \item Progressive testing (3-10 episodes) for reliable performance estimation
+\end{itemize}
+
+\begin{algorithm}
+\caption{LLM-RL-Agent Training Loop}
+\begin{algorithmic}[1]
+\FOR{episode $= 1$ to $N$}
+    \STATE Collect episode experience using current policy
+    \STATE Store experience in reward history
+    \STATE Test current policy over $k$ episodes
+    \STATE Compute average test reward $R_{avg}$
+    \IF{$R_{avg} > R_{best}$}
+        \STATE Update best policy $\leftarrow$ current policy
+        \STATE $R_{best} \leftarrow R_{avg}$
+    \ELSE
+        \STATE Revert current policy $\leftarrow$ best policy
+    \ENDIF
+    \STATE Query LLM with experience to generate new policy
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experimental Setup}
+
+\subsection{Environments}
+
+We evaluate on four OpenAI Gymnasium environments:
+
+\subsubsection{CartPole-v1}
+A classic control task where the objective is to balance a pole on a cart. State: 4D continuous (position, velocity, angle, angular velocity). Action: discrete (left/right). Discretization: $(3, 3, 6, 6) = 324$ states.
+
+\subsubsection{FrozenLake-v1}
+A grid navigation task where an agent must reach a goal while avoiding holes. State: discrete (16 positions). Action: discrete (4 directions). Non-slippery variant used.
+
+\subsubsection{Hopper-v5}
+A MuJoCo locomotion task where a one-legged robot must hop forward. State: 11D continuous. Action: 3D continuous. Discretization: $(2, 3, 2, 2, 2, 2, 1, 2, 1, 1, 1) = 384$ states.
+
+\subsubsection{BipedalWalker-v3}
+A Box2D locomotion task where a two-legged robot must walk forward. State: 24D continuous (reduced to 4D). Action: 4D continuous. Discretization: $(10, 10, 10, 10) = 10000$ states.
+
+\subsection{LLM Configuration}
+
+We use Google's Gemini models:
+\begin{itemize}
+    \item \textbf{Gemini 2.0 Flash}: Used for CartPole and Hopper
+    \item \textbf{Gemini 2.5 Flash}: Used for FrozenLake and BipedalWalker
+\end{itemize}
+
+Prompts include physics hints specific to each environment to guide the LLM's reasoning.
+
+\subsection{Training Protocol}
+
+\begin{itemize}
+    \item Total episodes: 100 per environment
+    \item Test episodes per update: 3-10 (progressive)
+    \item Experience history: Best 4 + worst 1 episodes provided to LLM
+    \item Retry mechanism: 5 attempts with 60-second delays for API errors
+\end{itemize}
+
+\section{Results}
+
+\subsection{CartPole-v1}
+
+CartPole showed strong performance with the LLM-based approach. The agent learned to balance the pole effectively, with training rewards showing clear improvement trends.
+
+\begin{table}[h]
+\centering
+\caption{CartPole-v1 Performance Summary}
+\begin{tabular}{lc}
+\toprule
+Metric & Value \\
+\midrule
+Max Episode Reward & 500 (max possible) \\
+State Space Size & 324 discrete states \\
+Policy Convergence & $\sim$20-30 episodes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The physics hints about counteracting pole lean by moving the cart under the pole proved effective in guiding LLM policy generation.
+
+\subsection{FrozenLake-v1}
+
+FrozenLake demonstrated rapid learning due to its fully discrete state-action space and deterministic dynamics (non-slippery setting).
+
+\begin{table}[h]
+\centering
+\caption{FrozenLake-v1 Performance Summary}
+\begin{tabular}{lc}
+\toprule
+Metric & Value \\
+\midrule
+Goal Reach Rate & High (deterministic) \\
+State Space Size & 16 discrete states \\
+Cycle Detection & 3 visits before random action \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The coordinate mapping provided to the LLM enabled it to reason about spatial navigation effectively.
+
+\subsection{Hopper-v5}
+
+Hopper presented significant challenges. The continuous control nature and complex locomotion dynamics resulted in limited success.
+
+\begin{table}[h]
+\centering
+\caption{Hopper-v5 Performance Summary}
+\begin{tabular}{lc}
+\toprule
+Metric & Value \\
+\midrule
+State Space Size & 384 discrete states \\
+Action Discretization & 3 values per dimension \\
+Performance & Limited/Unstable \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key challenges included:
+\begin{itemize}
+    \item High-dimensional state space requiring aggressive discretization
+    \item Temporal coordination requirements for hopping gait
+    \item Sensitivity to action timing and sequence
+\end{itemize}
+
+\subsection{BipedalWalker-v3}
+
+BipedalWalker showed the most limited success among the tested environments.
+
+\begin{table}[h]
+\centering
+\caption{BipedalWalker-v3 Performance Summary}
+\begin{tabular}{lc}
+\toprule
+Metric & Value \\
+\midrule
+State Space Size & 10000 discrete states \\
+Action Discretization & 3 values per dimension \\
+Performance & Limited \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Challenges included:
+\begin{itemize}
+    \item Large state space leading to sparse policy coverage
+    \item Complex leg coordination requirements
+    \item Penalty removal wrapper needed to prevent learning collapse
+\end{itemize}
+
+\subsection{Comparative Analysis}
+
+\begin{table}[h]
+\centering
+\caption{Cross-Environment Comparison}
+\begin{tabular}{lcccc}
+\toprule
+Environment & State Dim & Action Dim & Discrete & Success \\
+\midrule
+CartPole & 4 & 1 & Hybrid & \textbf{High} \\
+FrozenLake & 1 & 1 & Full & \textbf{High} \\
+Hopper & 11 & 3 & Cont. & Low \\
+BipedalWalker & 24 & 4 & Cont. & Low \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discussion}
+
+\subsection{Strengths of LLM-Based Policy Generation}
+
+\begin{enumerate}
+    \item \textbf{Sample Efficiency}: Learns meaningful policies with only ~100 episodes
+    \item \textbf{Interpretability}: Tabular policies are human-readable
+    \item \textbf{Physics Reasoning}: LLMs can leverage domain knowledge effectively
+    \item \textbf{No Gradient Computation}: Avoids issues with gradient estimation
+\end{enumerate}
+
+\subsection{Limitations and Challenges}
+
+\begin{enumerate}
+    \item \textbf{Continuous Control}: Struggles with high-dimensional continuous action spaces
+    \item \textbf{Temporal Dynamics}: Cannot easily capture time-dependent action sequences
+    \item \textbf{State Coverage}: Large discrete state spaces lead to sparse policies
+    \item \textbf{API Reliability}: Dependent on external LLM service availability
+    \item \textbf{Cost}: Each policy update requires API calls
+\end{enumerate}
+
+\subsection{When LLM-Based RL Works Best}
+
+Our results suggest LLM-guided policy generation is most effective when:
+\begin{itemize}
+    \item State and action spaces are discrete or can be coarsely discretized
+    \item The task has clear physics intuitions that can be verbalized
+    \item Optimal policies don't require precise continuous control
+    \item The state space is small enough for tabular representation
+\end{itemize}
+
+\subsection{Why Hopper and BipedalWalker Struggled}
+
+The limited success on locomotion tasks stems from fundamental limitations:
+
+\begin{enumerate}
+    \item \textbf{Discretization Loss}: Continuous motor control requires fine-grained actions that are lost in discretization
+    \item \textbf{Temporal Abstraction}: Walking/hopping gaits require precise timing that tabular policies cannot capture
+    \item \textbf{Exploration}: Random actions in unvisited states often lead to immediate failure
+    \item \textbf{Credit Assignment}: Long episodes make it hard to attribute rewards to specific actions
+\end{enumerate}
+
+\section{Future Work}
+
+Several directions could improve performance:
+
+\begin{itemize}
+    \item \textbf{Hierarchical Policies}: Use LLMs for high-level planning with learned low-level controllers
+    \item \textbf{Continuous Policy Networks}: Have LLMs design neural network architectures instead of tabular policies
+    \item \textbf{Demonstration Integration}: Combine LLM reasoning with successful demonstration trajectories
+    \item \textbf{Multi-Modal Input}: Provide visual observations alongside state vectors
+    \item \textbf{Fine-Tuned Models}: Train LLMs specifically on RL domain data
+\end{itemize}
+
+\section{Conclusion}
+
+We presented LLM-RL-Agent, a framework using Large Language Models as policy generators for reinforcement learning. Our experiments across four Gymnasium environments reveal both the potential and limitations of this approach. While LLMs excel at generating policies for discrete and low-dimensional control tasks like CartPole and FrozenLake, they struggle with the precise temporal coordination required for continuous locomotion tasks like Hopper and BipedalWalker.
+
+The key insight is that LLMs are effective ``physics consultants'' for conceptually simple control problems but cannot replace the fine-grained optimization of traditional RL for complex continuous control. Future work should focus on hybrid approaches that leverage LLM reasoning for high-level planning while using traditional methods for low-level control.
+
+The complete implementation, including all environment agents, training logs, and visualization tools, is publicly available at: \url{https://github.com/kevalshah14/LLM-RL-Agent.git}
+
+\section*{Acknowledgment}
+
+This work utilizes Google's Gemini API for LLM inference and OpenAI Gymnasium for reinforcement learning environments.
+
+\end{document}
