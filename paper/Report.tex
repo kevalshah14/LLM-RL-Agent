@@ -47,7 +47,7 @@ Reinforcement learning (RL) has achieved remarkable success in domains ranging f
 
 Large Language Models (LLMs) have recently emerged as powerful tools capable of reasoning, planning, and generating structured outputs. This raises an intriguing question: \textit{Can LLMs serve as direct policy generators for RL tasks, leveraging their vast knowledge of physics, control, and optimization to accelerate learning?}
 
-In this work, we present LLM-RL-Agent, a framework that uses LLMs---specifically Google's Gemini models---to iteratively generate and refine tabular policies for control tasks. Our approach treats the LLM as an ``expert consultant'' that analyzes reward histories from past episodes and proposes improved state-action mappings.
+In this work, we present LLM-RL-Agent, a framework that uses LLMs (specifically Google's Gemini models) to iteratively generate and refine tabular policies for control tasks. Our approach treats the LLM as an ``expert consultant'' that analyzes reward histories from past episodes and proposes improved state-action mappings.
 
 Our main contributions are:
 \begin{itemize}
@@ -206,6 +206,20 @@ Policy Convergence & $\sim$20-30 episodes \\
 \end{tabular}
 \end{table}
 
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.45\textwidth]{Training_Logs.png}
+\caption{CartPole-v1 Training Rewards over Episodes}
+\label{fig:cartpole_training}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.45\textwidth]{Testing_Logs.png}
+\caption{CartPole-v1 Testing Rewards over Episodes}
+\label{fig:cartpole_testing}
+\end{figure}
+
 The physics hints about counteracting pole lean by moving the cart under the pole proved effective in guiding LLM policy generation.
 
 \subsection{FrozenLake-v1}
@@ -225,6 +239,20 @@ Cycle Detection & 3 visits before random action \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.45\textwidth]{frozenlake_training_rewards_smoothed1.png}
+\caption{FrozenLake-v1 Training Rewards over Episodes}
+\label{fig:frozenlake_training}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.45\textwidth]{frozenlake_avg_test_rewards_smoothed1.png}
+\caption{FrozenLake-v1 Testing Rewards over Episodes}
+\label{fig:frozenlake_testing}
+\end{figure}
 
 The coordinate mapping provided to the LLM enabled it to reason about spatial navigation effectively.
 
